@@ -50,6 +50,13 @@
             <version>${powsybl-core.version}</version>
         </dependency>
 
+        <!-- Network topology modifications (CreateFeederBay etc.) -->
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-iidm-modification</artifactId>
+            <version>${powsybl-core.version}</version>
+        </dependency>
+
         <!-- A LoadFlow implementation, so we can validate the equivalent -->
         <dependency>
             <groupId>com.powsybl</groupId>
