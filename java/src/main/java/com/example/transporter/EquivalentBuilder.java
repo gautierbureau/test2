@@ -1,5 +1,6 @@
 package com.example.transporter;
 
+import com.powsybl.iidm.modification.topology.CreateFeederBayBuilder;
 import com.powsybl.iidm.network.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -90,15 +91,16 @@ public final class EquivalentBuilder {
         }
         TopologyKind topologyKind = hvVl.getTopologyKind();
         Terminal hvTerm = sameSideTerminal(tx, op);
-        // For node-breaker: remember the node; the transformer keeps its
-        // own internal node but disconnecting it leaves the node free.
-        // We connect the new generator on a fresh node and add an internal
-        // closed switch to the transformer's old node, so we don't disturb
-        // the rest of the topology. For simplicity, we reuse the node by
-        // attaching directly via setNode after the transformer removal.
-        Integer hvNode = (topologyKind == TopologyKind.NODE_BREAKER)
-                ? hvTerm.getNodeBreakerView().getNode()
-                : null;
+        // For node-breaker: identify the busbar section to connect the new
+        // generator to via CreateFeederBay (adds a proper disconnector+breaker bay).
+        String hvBusbarSectionId = null;
+        if (topologyKind == TopologyKind.NODE_BREAKER) {
+            hvBusbarSectionId = hvVl.getNodeBreakerView().getBusbarSectionStream()
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalStateException(
+                            "No busbar section in HV voltage level: " + hvVl.getId()))
+                    .getId();
+        }
         String hvBusBreakerBusId = (topologyKind == TopologyKind.BUS_BREAKER)
                 ? hvTerm.getBusBreakerView().getBus().getId()
                 : null;
@@ -130,14 +132,26 @@ public final class EquivalentBuilder {
                 .setTargetV(nomHv)
                 .setVoltageRegulatorOn(false);
 
+        Generator newGen;
         if (topologyKind == TopologyKind.NODE_BREAKER) {
-            // Reuse the node previously used by the transformer's HV terminal.
-            adder.setNode(hvNode);
+            // Use CreateFeederBay to wire the generator with a proper
+            // disconnector + breaker bay attached to the busbar section.
+            new CreateFeederBayBuilder()
+                    .withInjectionAdder(adder)
+                    .withBusOrBusbarSectionId(hvBusbarSectionId)
+                    .withInjectionPositionOrder(1)
+                    .build()
+                    .apply(network);
+            newGen = network.getGenerator(newGeneratorId);
+            if (newGen == null) {
+                throw new IllegalStateException(
+                        "CreateFeederBay did not create generator: " + newGeneratorId);
+            }
         } else {
             adder.setBus(hvBusBreakerBusId)
                  .setConnectableBus(hvBusBreakerBusId);
+            newGen = adder.add();
         }
-        Generator newGen = adder.add();
 
         // Attach the transported reactive capability curve
         ReactiveCapabilityCurveAdder curveAdder = newGen.newReactiveCapabilityCurve();

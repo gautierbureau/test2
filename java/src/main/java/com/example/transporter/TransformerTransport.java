@@ -1,5 +1,6 @@
 package com.example.transporter;
 
+import com.powsybl.iidm.network.Bus;
 import com.powsybl.iidm.network.RatioTapChanger;
 import com.powsybl.iidm.network.TwoWindingsTransformer;
 import org.apache.commons.math3.complex.Complex;
@@ -64,8 +65,10 @@ public final class TransformerTransport {
             nomHv = nom2;
             hvVlId = tx.getTerminal2().getVoltageLevel().getId();
             lvVlId = tx.getTerminal1().getVoltageLevel().getId();
-            hvBusId = tx.getTerminal2().getBusBreakerView().getBus().getId();
-            lvBusId = tx.getTerminal1().getBusBreakerView().getBus().getId();
+            Bus hvBus2 = tx.getTerminal2().getBusBreakerView().getBus();
+            hvBusId = (hvBus2 != null) ? hvBus2.getId() : null;
+            Bus lvBus1 = tx.getTerminal1().getBusBreakerView().getBus();
+            lvBusId = (lvBus1 != null) ? lvBus1.getId() : null;
         } else {
             // side 2 is LV - refer R,X,G,B from LV up to HV
             ratedLv = tx.getRatedU2();
@@ -80,8 +83,10 @@ public final class TransformerTransport {
             nomHv = nom1;
             hvVlId = tx.getTerminal1().getVoltageLevel().getId();
             lvVlId = tx.getTerminal2().getVoltageLevel().getId();
-            hvBusId = tx.getTerminal1().getBusBreakerView().getBus().getId();
-            lvBusId = tx.getTerminal2().getBusBreakerView().getBus().getId();
+            Bus hvBus1 = tx.getTerminal1().getBusBreakerView().getBus();
+            hvBusId = (hvBus1 != null) ? hvBus1.getId() : null;
+            Bus lvBus2 = tx.getTerminal2().getBusBreakerView().getBus();
+            lvBusId = (lvBus2 != null) ? lvBus2.getId() : null;
         }
 
         // Read the current rho from the ratio tap changer if any.
