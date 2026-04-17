@@ -30,11 +30,17 @@ Requires: pypowsybl >= 1.5
 
 from __future__ import annotations
 
+import argparse
+import pathlib
+
 import numpy as np
 import pandas as pd
 import pypowsybl as pp
 import pypowsybl.loadflow as lf
 import pypowsybl.network as pn
+
+# IIDM version compatible with powsybl-core 7.x (supports up to 1.15)
+_EXPORT_IIDM_VERSION = "1.15"
 
 
 # ---------------------------------------------------------------------------
@@ -494,9 +500,47 @@ def hv_flow_into_grid(network: pn.Network, transformer_id: str | None,
 
 
 # ---------------------------------------------------------------------------
+#  Network export
+# ---------------------------------------------------------------------------
+def export_test_network(path: str | pathlib.Path) -> None:
+    """
+    Build the standard test network and save it as an XIIDM file at *path*.
+
+    The file is written at IIDM schema version 1.15 so that it can be read by
+    powsybl-core 7.x from the Java side without a version mismatch.
+
+    Usage example (regenerate the bundled resource file)::
+
+        python transport_curve.py \
+            --save-network ../java/src/main/resources/test_network.xiidm
+    """
+    net = build_test_network()
+    net.save(
+        str(path),
+        format="XIIDM",
+        parameters={"iidm.export.xml.version": _EXPORT_IIDM_VERSION},
+    )
+    print(f"Saved test network → {path}  (IIDM {_EXPORT_IIDM_VERSION})")
+
+
+# ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Transport reactive capability curves and validate equivalence."
+    )
+    parser.add_argument(
+        "--save-network",
+        metavar="PATH",
+        help="Export the original test network to PATH as XIIDM and exit.",
+    )
+    args = parser.parse_args()
+
+    if args.save_network:
+        export_test_network(args.save_network)
+        return
+
     np.set_printoptions(precision=3, suppress=True)
     pd.set_option("display.precision", 3)
     pd.set_option("display.width", 140)
