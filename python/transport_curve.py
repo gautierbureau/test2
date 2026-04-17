@@ -32,6 +32,9 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+from dataclasses import dataclass
+from enum import Enum
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -41,6 +44,41 @@ import pypowsybl.network as pn
 
 # IIDM version compatible with powsybl-core 7.x (supports up to 1.15)
 _EXPORT_IIDM_VERSION = "1.15"
+
+
+# ---------------------------------------------------------------------------
+#  Multi-generator types
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class GeneratorSpec:
+    """Specification of one LV generator to transport through a shared transformer.
+
+    Attributes:
+        generator_id:      ID of the LV-side generator.
+        aux_load_id:       ID of this generator's auxiliary load on the LV bus,
+                           or ``None`` if none.
+        new_generator_id:  ID for the new equivalent HV generator.
+    """
+    generator_id: str
+    aux_load_id: str | None
+    new_generator_id: str
+
+
+class LossAllocation(str, Enum):
+    """Policy for allocating transformer losses between generators.
+
+    - ``INDEPENDENT``: each generator is transported as if alone on the LV
+      bus. Series (copper) losses are implicitly split as :math:`|S_i|^2`
+      per generator, but cross-terms between generators are dropped and
+      shunt (magnetising) losses are counted once per generator.
+    - ``COMBINED_PROPORTIONAL``: the combined LV injection is transported
+      once, and the resulting HV losses are split between generators
+      proportionally to :math:`|S_i|^2`. The sum of HV equivalents equals
+      the exact combined transport; for a single generator this reduces
+      to the INDEPENDENT result.
+    """
+    INDEPENDENT = "INDEPENDENT"
+    COMBINED_PROPORTIONAL = "COMBINED_PROPORTIONAL"
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +197,92 @@ def build_test_network() -> pn.Network:
         x=[x],
     )
 
+    return net
+
+
+def build_two_generators_network() -> pn.Network:
+    """Mirror of Java's NodeBreakerNetworkFactory.createTwoGenerators().
+
+    HV is NODE_BREAKER, LV is BUS_BREAKER. Two generators (GEN_LV_A, GEN_LV_B)
+    with distinct aux loads (AUX_LOAD_A, AUX_LOAD_B) share the same LV bus
+    behind the single transformer TX. HV_LOAD is 600/80 to balance the larger
+    LV injection.
+    """
+    net = pn.create_empty("test_two_gens")
+    net.create_substations(id=["S_MAIN"])
+
+    net.create_voltage_levels(
+        id=["VL_HV"], substation_id=["S_MAIN"],
+        topology_kind=["NODE_BREAKER"], nominal_v=[400.0],
+    )
+    net.create_busbar_sections(id=["BBS_HV"], voltage_level_id=["VL_HV"], node=[0])
+
+    net.create_switches(id=["DISC_EXT"], voltage_level_id=["VL_HV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[1], open=[False])
+    net.create_switches(id=["BRK_EXT"], voltage_level_id=["VL_HV"],
+                        kind=["BREAKER"], node1=[1], node2=[2], open=[False])
+    net.create_generators(
+        id=["EXT_GRID"], voltage_level_id=["VL_HV"], node=[2],
+        min_p=[-5000.0], max_p=[5000.0], target_p=[0.0],
+        target_v=[400.0], target_q=[0.0], voltage_regulator_on=[True],
+    )
+    net.create_minmax_reactive_limits(id=["EXT_GRID"], min_q=[-5000.0], max_q=[5000.0])
+
+    net.create_switches(id=["DISC_LOAD"], voltage_level_id=["VL_HV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[3], open=[False])
+    net.create_switches(id=["BRK_LOAD"], voltage_level_id=["VL_HV"],
+                        kind=["BREAKER"], node1=[3], node2=[4], open=[False])
+    net.create_loads(id=["HV_LOAD"], voltage_level_id=["VL_HV"], node=[4],
+                     p0=[600.0], q0=[80.0])
+
+    net.create_switches(id=["DISC_TX"], voltage_level_id=["VL_HV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[5], open=[False])
+    net.create_switches(id=["BRK_TX"], voltage_level_id=["VL_HV"],
+                        kind=["BREAKER"], node1=[5], node2=[6], open=[False])
+
+    net.create_voltage_levels(
+        id=["VL_LV"], substation_id=["S_MAIN"],
+        topology_kind=["BUS_BREAKER"], nominal_v=[20.0],
+    )
+    net.create_buses(id=["BUS_LV"], voltage_level_id=["VL_LV"])
+
+    net.create_generators(
+        id=["GEN_LV_A"], voltage_level_id=["VL_LV"], bus_id=["BUS_LV"],
+        min_p=[0.0], max_p=[500.0], target_p=[400.0],
+        target_v=[20.5], target_q=[0.0], voltage_regulator_on=[True],
+    )
+    net.create_curve_reactive_limits(
+        id=["GEN_LV_A"] * 4, p=[0.0, 100.0, 300.0, 500.0],
+        min_q=[-150.0, -200.0, -180.0, -100.0],
+        max_q=[ 150.0,  250.0,  220.0,  120.0],
+    )
+    net.create_loads(id=["AUX_LOAD_A"], voltage_level_id=["VL_LV"], bus_id=["BUS_LV"],
+                     p0=[15.0], q0=[5.0])
+
+    net.create_generators(
+        id=["GEN_LV_B"], voltage_level_id=["VL_LV"], bus_id=["BUS_LV"],
+        min_p=[0.0], max_p=[400.0], target_p=[200.0],
+        target_v=[20.5], target_q=[0.0], voltage_regulator_on=[True],
+    )
+    net.create_curve_reactive_limits(
+        id=["GEN_LV_B"] * 3, p=[0.0, 200.0, 400.0],
+        min_q=[-120.0, -150.0, -80.0],
+        max_q=[ 120.0,  180.0, 100.0],
+    )
+    net.create_loads(id=["AUX_LOAD_B"], voltage_level_id=["VL_LV"], bus_id=["BUS_LV"],
+                     p0=[8.0], q0=[3.0])
+
+    sn = 600.0
+    zb_lv = 20.0 ** 2 / sn
+    yb_lv = 1.0 / zb_lv
+    net.create_2_windings_transformers(
+        id=["TX"],
+        voltage_level1_id=["VL_HV"], node1=[6],
+        voltage_level2_id=["VL_LV"], bus2_id=["BUS_LV"],
+        rated_u1=[400.0], rated_u2=[20.0], rated_s=[sn],
+        r=[0.004 * zb_lv], x=[0.12 * zb_lv],
+        g=[0.0006 * yb_lv], b=[-0.018 * yb_lv],
+    )
     return net
 
 
@@ -576,6 +700,261 @@ def transport_capability_curve(
 
 
 # ---------------------------------------------------------------------------
+#  3b.  Multi-generator transport helpers
+# ---------------------------------------------------------------------------
+def _read_gen_sampling_data(
+    network: pn.Network, generator_id: str, aux_load_id: str | None
+):
+    """Read the raw data needed to sample one generator's curve.
+
+    Returns (p_min, p_max, p_curve_pts, qmin_pts, qmax_pts, p_aux, q_aux, v_lv).
+    If the generator has no curve, ``p_curve_pts`` is ``None`` and ``qmin_pts`` /
+    ``qmax_pts`` contain the single scalar min_q / max_q.
+    """
+    gens = network.get_generators()
+    gen = gens.loc[generator_id]
+    p_min, p_max = float(gen["min_p"]), float(gen["max_p"])
+    v_lv = float(gen["target_v"])
+
+    curve_pts = network.get_reactive_capability_curve_points()
+    if generator_id in curve_pts.index.get_level_values(0):
+        gen_curve = (
+            curve_pts.loc[generator_id]
+            .sort_values("p")
+            .reset_index(drop=True)
+        )
+        p_curve_pts = gen_curve["p"].to_numpy()
+        qmin_pts = gen_curve["min_q"].to_numpy()
+        qmax_pts = gen_curve["max_q"].to_numpy()
+    else:
+        p_curve_pts = None
+        qmin_pts = float(gen["min_q"])
+        qmax_pts = float(gen["max_q"])
+
+    p_aux, q_aux = 0.0, 0.0
+    if aux_load_id is not None:
+        loads = network.get_loads()
+        if aux_load_id in loads.index:
+            p_aux = float(loads.loc[aux_load_id, "p0"])
+            q_aux = float(loads.loc[aux_load_id, "q0"])
+
+    return p_min, p_max, p_curve_pts, qmin_pts, qmax_pts, p_aux, q_aux, v_lv
+
+
+def _s2_weights(p_gen: np.ndarray, q_gen: np.ndarray,
+                p_aux: np.ndarray, q_aux: np.ndarray) -> np.ndarray:
+    """Split weights proportional to ``|S_i|^2`` with uniform fallback.
+
+    ``S_i = (P_i - P_aux_i) + j*(Q_i - Q_aux_i)``. Weights sum to 1; if every
+    ``|S_i|^2`` is numerically zero, falls back to ``1/n`` per generator.
+    """
+    p = p_gen - p_aux
+    q = q_gen - q_aux
+    w = p * p + q * q
+    s = w.sum()
+    if s < 1e-12:
+        return np.full_like(w, 1.0 / len(w))
+    return w / s
+
+
+def _validate_specs(specs: Sequence[GeneratorSpec]) -> None:
+    """Reject empty lists and duplicate gen / aux / new IDs across specs."""
+    if not specs:
+        raise ValueError("At least one generator spec is required")
+    seen_gen, seen_aux, seen_new = set(), set(), set()
+    for spec in specs:
+        if spec.generator_id is None or spec.new_generator_id is None:
+            raise ValueError(
+                "generator_id and new_generator_id are required on every GeneratorSpec"
+            )
+        if spec.generator_id in seen_gen:
+            raise ValueError(f"Duplicate generator ID across specs: {spec.generator_id}")
+        seen_gen.add(spec.generator_id)
+        if spec.new_generator_id in seen_new:
+            raise ValueError(f"Duplicate new generator ID: {spec.new_generator_id}")
+        seen_new.add(spec.new_generator_id)
+        if spec.aux_load_id is not None:
+            if spec.aux_load_id in seen_aux:
+                raise ValueError(
+                    f"Duplicate auxiliary load ID across specs: {spec.aux_load_id} "
+                    "(each auxiliary load must be assigned to at most one generator)"
+                )
+            seen_aux.add(spec.aux_load_id)
+
+
+def _transport_independent(
+    network: pn.Network,
+    specs: Sequence[GeneratorSpec],
+    transformer_id: str,
+    n_samples: int,
+) -> list[tuple[pd.DataFrame, float, float]]:
+    """Per-generator independent transport (legacy behaviour).
+
+    Returns a list of ``(curve_df, p_op_hv, q_op_hv)`` tuples, one per spec
+    (in order).
+    """
+    tp = get_oriented_transformer_params(network, transformer_id)
+    results = []
+    for spec in specs:
+        gens = network.get_generators()
+        gen = gens.loc[spec.generator_id]
+        v_lv = float(gen["target_v"])
+
+        curve = transport_capability_curve(
+            network, spec.generator_id, transformer_id, spec.aux_load_id,
+            v_lv_kv=v_lv, n_samples=n_samples,
+        )
+
+        p_aux = 0.0
+        q_aux = 0.0
+        if spec.aux_load_id is not None:
+            loads = network.get_loads()
+            if spec.aux_load_id in loads.index:
+                p_aux = float(loads.loc[spec.aux_load_id, "p0"])
+                q_aux = float(loads.loc[spec.aux_load_id, "q0"])
+
+        p_op_hv, q_op_hv, _ = transport_point(
+            float(gen["target_p"]) - p_aux,
+            float(gen["target_q"]) - q_aux,
+            v_lv,
+            tp["r"], tp["x"], tp["g"], tp["b"],
+            tp["rated_lv"], tp["rated_hv"], tp["rho_tap"],
+        )
+        results.append((curve, p_op_hv, q_op_hv))
+    return results
+
+
+def _transport_combined_proportional(
+    network: pn.Network,
+    specs: Sequence[GeneratorSpec],
+    transformer_id: str,
+    n_samples: int,
+) -> list[tuple[pd.DataFrame, float, float]]:
+    """Combined transport with proportional ``|S_i|^2`` loss split.
+
+    The combined LV injection is transported once per sample (at each Q
+    extremum); the resulting HV losses are split between generators
+    proportionally to ``|S_i|^2``. For a single generator this reduces to the
+    INDEPENDENT result.
+    """
+    if n_samples < 2:
+        raise ValueError("n_samples must be >= 2")
+
+    tp = get_oriented_transformer_params(network, transformer_id)
+
+    n = len(specs)
+    p_min = np.zeros(n)
+    p_max = np.zeros(n)
+    p_aux = np.zeros(n)
+    q_aux = np.zeros(n)
+    p_curves: list[np.ndarray | None] = []
+    qmin_curves: list[np.ndarray | float] = []
+    qmax_curves: list[np.ndarray | float] = []
+    v_lv_kv = float("nan")
+    p_target = np.zeros(n)
+    q_target = np.zeros(n)
+
+    gens_df = network.get_generators()
+    for g, spec in enumerate(specs):
+        (p_min[g], p_max[g], pc, qmnp, qmxp,
+         p_aux[g], q_aux[g], v_lv_g) = _read_gen_sampling_data(
+            network, spec.generator_id, spec.aux_load_id,
+        )
+        p_curves.append(pc)
+        qmin_curves.append(qmnp)
+        qmax_curves.append(qmxp)
+        p_target[g] = float(gens_df.loc[spec.generator_id, "target_p"])
+        q_target[g] = float(gens_df.loc[spec.generator_id, "target_q"])
+
+        # All generators on the shared LV bus must regulate the same voltage.
+        if np.isnan(v_lv_kv):
+            v_lv_kv = v_lv_g
+        elif abs(v_lv_g - v_lv_kv) > 1e-3:
+            # Match the Java warning; in Python we just keep the first valid.
+            import logging
+            logging.getLogger(__name__).warning(
+                "Generator %s targetV=%g kV disagrees with LV voltage %g kV "
+                "used for combined transport", spec.generator_id, v_lv_g, v_lv_kv)
+
+    def _interp(p_val: float, p_pts, q_pts) -> float:
+        if p_pts is None:
+            return float(q_pts)
+        return float(np.interp(p_val, p_pts, q_pts))
+
+    per_gen_rows: list[list[dict]] = [[] for _ in range(n)]
+
+    for i in range(n_samples):
+        t = i / (n_samples - 1)
+
+        p_gen = p_min + t * (p_max - p_min)
+        qmin = np.array([_interp(p_gen[g], p_curves[g], qmin_curves[g]) for g in range(n)])
+        qmax = np.array([_interp(p_gen[g], p_curves[g], qmax_curves[g]) for g in range(n)])
+
+        p_lv = np.sum(p_gen - p_aux)
+        q_lv_lo = np.sum(qmin - q_aux)
+        q_lv_hi = np.sum(qmax - q_aux)
+
+        p_hv_lo_c, q_hv_lo_c, _ = transport_point(
+            p_lv, q_lv_lo, v_lv_kv,
+            tp["r"], tp["x"], tp["g"], tp["b"],
+            tp["rated_lv"], tp["rated_hv"], tp["rho_tap"],
+        )
+        p_hv_hi_c, q_hv_hi_c, _ = transport_point(
+            p_lv, q_lv_hi, v_lv_kv,
+            tp["r"], tp["x"], tp["g"], tp["b"],
+            tp["rated_lv"], tp["rated_hv"], tp["rho_tap"],
+        )
+
+        p_loss_lo = p_lv - p_hv_lo_c
+        q_loss_lo = q_lv_lo - q_hv_lo_c
+        p_loss_hi = p_lv - p_hv_hi_c
+        q_loss_hi = q_lv_hi - q_hv_hi_c
+
+        w_lo = _s2_weights(p_gen, qmin, p_aux, q_aux)
+        w_hi = _s2_weights(p_gen, qmax, p_aux, q_aux)
+
+        for g in range(n):
+            p_hv_lo = (p_gen[g] - p_aux[g]) - w_lo[g] * p_loss_lo
+            q_hv_lo = (qmin[g]  - q_aux[g]) - w_lo[g] * q_loss_lo
+            p_hv_hi = (p_gen[g] - p_aux[g]) - w_hi[g] * p_loss_hi
+            q_hv_hi = (qmax[g]  - q_aux[g]) - w_hi[g] * q_loss_hi
+
+            per_gen_rows[g].append({
+                "p_orig":    p_gen[g],
+                "q_min_orig": qmin[g],
+                "q_max_orig": qmax[g],
+                "p":     0.5 * (p_hv_lo + p_hv_hi),
+                "min_q": min(q_hv_lo, q_hv_hi),
+                "max_q": max(q_hv_lo, q_hv_hi),
+            })
+
+    # Transport the combined operating point and split it proportionally.
+    p_lv_op = float(np.sum(p_target - p_aux))
+    q_lv_op = float(np.sum(q_target - q_aux))
+    p_hv_op_c, q_hv_op_c, _ = transport_point(
+        p_lv_op, q_lv_op, v_lv_kv,
+        tp["r"], tp["x"], tp["g"], tp["b"],
+        tp["rated_lv"], tp["rated_hv"], tp["rho_tap"],
+    )
+    p_loss_op = p_lv_op - p_hv_op_c
+    q_loss_op = q_lv_op - q_hv_op_c
+    w_op = _s2_weights(p_target, q_target, p_aux, q_aux)
+
+    results: list[tuple[pd.DataFrame, float, float]] = []
+    for g in range(n):
+        df = pd.DataFrame(per_gen_rows[g])
+        # Enforce strictly increasing P (match Java tweak for near-duplicates).
+        df = df.sort_values("p").reset_index(drop=True)
+        for i in range(1, len(df)):
+            if df.loc[i, "p"] - df.loc[i - 1, "p"] < 1e-6:
+                df.loc[i, "p"] = df.loc[i - 1, "p"] + 1e-6
+        p_op_hv = (p_target[g] - p_aux[g]) - w_op[g] * p_loss_op
+        q_op_hv = (q_target[g] - q_aux[g]) - w_op[g] * q_loss_op
+        results.append((df, float(p_op_hv), float(q_op_hv)))
+    return results
+
+
+# ---------------------------------------------------------------------------
 #  4.  Build the equivalent network
 # ---------------------------------------------------------------------------
 
@@ -669,97 +1048,122 @@ def build_equivalent_network(
     are cleaned up automatically and the new generator is wired via a proper
     disconnector + breaker bay.
     """
-    # Read the LV regulating setpoint as the assumed LV voltage
-    gen = original.get_generators().loc[generator_id]
-    v_lv = float(gen["target_v"])
-
-    curve = transport_capability_curve(
-        original, generator_id, transformer_id, aux_load_id,
-        v_lv_kv=v_lv, n_samples=n_samples,
+    eq, curves = build_equivalent_network_multi(
+        original,
+        [GeneratorSpec(generator_id, aux_load_id, new_gen_id)],
+        transformer_id,
+        n_samples=n_samples,
     )
+    return eq, curves[0]
 
-    # Oriented transformer parameters (HV-referred)
+
+def build_equivalent_network_multi(
+    original: pn.Network,
+    specs: Sequence[GeneratorSpec],
+    transformer_id: str,
+    n_samples: int = 25,
+    loss_allocation: LossAllocation = LossAllocation.INDEPENDENT,
+) -> tuple[pn.Network, list[pd.DataFrame]]:
+    """
+    Build a network where one or more LV generators sharing the same
+    transformer are replaced by equivalent HV generators.
+
+    Each spec produces one new HV generator carrying its own transported
+    reactive capability curve and operating point. The original generators,
+    their (distinct) auxiliary loads, and the shared transformer are removed.
+
+    ``loss_allocation`` picks how transformer losses are attributed when more
+    than one generator is supplied. For a single generator both policies yield
+    identical results.
+
+    Returns ``(equivalent_network, [curve_df_for_spec_0, ...])`` preserving the
+    input order of *specs*.
+    """
+    _validate_specs(specs)
+    if loss_allocation == LossAllocation.COMBINED_PROPORTIONAL:
+        per_gen = _transport_combined_proportional(
+            original, specs, transformer_id, n_samples,
+        )
+    else:
+        per_gen = _transport_independent(
+            original, specs, transformer_id, n_samples,
+        )
+
+    # Oriented transformer parameters (HV-referred) - captured before mutation.
     tp = get_oriented_transformer_params(original, transformer_id)
 
-    # Active-power range from the transported curve
-    p_min_eq = float(curve["p"].min())
-    p_max_eq = float(curve["p"].max())
-
-    # Operating point: transport the original generator's target (P, Q)
-    p_target_orig = float(gen["target_p"])
-    q_target_orig = float(gen["target_q"])
-    p_aux = float(original.get_loads().loc[aux_load_id, "p0"]) if aux_load_id else 0.0
-    q_aux = float(original.get_loads().loc[aux_load_id, "q0"]) if aux_load_id else 0.0
-    p_op_hv, q_op_hv, _ = transport_point(
-        p_target_orig - p_aux, q_target_orig - q_aux, v_lv,
-        tp["r"], tp["x"], tp["g"], tp["b"],
-        tp["rated_lv"], tp["rated_hv"], tp["rho_tap"],
-    )
-
-    # Clone the network, then strip the LV-side equipment.
-    # _remove_element_and_feeder_bay cleans up feeder bay switches in
-    # NODE_BREAKER voltage levels and is a no-op on that layer for BUS_BREAKER.
+    # Clone once, then remove every LV-side piece of equipment.
     eq = pn.load_from_string("equivalent.xiidm", original.save_to_string())
-    _remove_element_and_feeder_bay(eq, generator_id)
-    if aux_load_id is not None:
-        _remove_element_and_feeder_bay(eq, aux_load_id)
+    for spec in specs:
+        _remove_element_and_feeder_bay(eq, spec.generator_id)
+        if spec.aux_load_id is not None:
+            _remove_element_and_feeder_bay(eq, spec.aux_load_id)
     _remove_element_and_feeder_bay(eq, transformer_id)
 
-    # Determine HV voltage level topology
+    # HV topology snapshot
     hv_vl_id = tp["hv_vl_id"]
     hv_topology = eq.get_voltage_levels(all_attributes=True).loc[
         hv_vl_id, "topology_kind"
     ]
 
     if hv_topology == "NODE_BREAKER":
-        # Find the busbar section node and the highest node currently in use.
         topo = eq.get_node_breaker_topology(hv_vl_id)
         bbs_node = int(
             topo.nodes[topo.nodes["connectable_type"] == "BUSBAR_SECTION"].index[0]
         )
         sw = topo.switches
-        max_node = int(max(sw["node1"].max(), sw["node2"].max())) if len(sw) else bbs_node
-
-        n_intermediate = max_node + 1
-        n_gen = max_node + 2
-
-        eq.create_switches(
-            id=[f"DISC_{new_gen_id}"], voltage_level_id=[hv_vl_id],
-            kind=["DISCONNECTOR"], node1=[bbs_node], node2=[n_intermediate], open=[False],
-        )
-        eq.create_switches(
-            id=[f"BRK_{new_gen_id}"], voltage_level_id=[hv_vl_id],
-            kind=["BREAKER"], node1=[n_intermediate], node2=[n_gen], open=[False],
-        )
-        eq.create_generators(
-            id=[new_gen_id], voltage_level_id=[hv_vl_id], node=[n_gen],
-            min_p=[p_min_eq], max_p=[p_max_eq],
-            target_p=[p_op_hv], target_q=[q_op_hv],
-            target_v=[tp["nom_hv"]], voltage_regulator_on=[False],
-        )
+        next_node = (int(max(sw["node1"].max(), sw["node2"].max())) + 1
+                     if len(sw) else bbs_node + 1)
     else:
-        eq.create_generators(
-            id=[new_gen_id],
-            voltage_level_id=[hv_vl_id],
-            bus_id=[tp["hv_bus_id"]],
-            min_p=[p_min_eq],
-            max_p=[p_max_eq],
-            target_p=[p_op_hv],
-            target_q=[q_op_hv],
-            target_v=[tp["nom_hv"]],
-            voltage_regulator_on=[False],
+        bbs_node = None
+        next_node = None
+
+    curves: list[pd.DataFrame] = []
+    for spec, (curve, p_op_hv, q_op_hv) in zip(specs, per_gen):
+        p_min_eq = float(curve["p"].min())
+        p_max_eq = float(curve["p"].max())
+
+        if hv_topology == "NODE_BREAKER":
+            n_intermediate = next_node
+            n_gen = next_node + 1
+            next_node += 2
+            eq.create_switches(
+                id=[f"DISC_{spec.new_generator_id}"], voltage_level_id=[hv_vl_id],
+                kind=["DISCONNECTOR"], node1=[bbs_node], node2=[n_intermediate],
+                open=[False],
+            )
+            eq.create_switches(
+                id=[f"BRK_{spec.new_generator_id}"], voltage_level_id=[hv_vl_id],
+                kind=["BREAKER"], node1=[n_intermediate], node2=[n_gen],
+                open=[False],
+            )
+            eq.create_generators(
+                id=[spec.new_generator_id], voltage_level_id=[hv_vl_id], node=[n_gen],
+                min_p=[p_min_eq], max_p=[p_max_eq],
+                target_p=[p_op_hv], target_q=[q_op_hv],
+                target_v=[tp["nom_hv"]], voltage_regulator_on=[False],
+            )
+        else:
+            eq.create_generators(
+                id=[spec.new_generator_id],
+                voltage_level_id=[hv_vl_id],
+                bus_id=[tp["hv_bus_id"]],
+                min_p=[p_min_eq], max_p=[p_max_eq],
+                target_p=[p_op_hv], target_q=[q_op_hv],
+                target_v=[tp["nom_hv"]],
+                voltage_regulator_on=[False],
+            )
+
+        curve_sorted = curve.sort_values("p").drop_duplicates(subset="p", keep="first")
+        eq.create_curve_reactive_limits(
+            id=[spec.new_generator_id] * len(curve_sorted),
+            p=curve_sorted["p"].tolist(),
+            min_q=curve_sorted["min_q"].tolist(),
+            max_q=curve_sorted["max_q"].tolist(),
         )
+        curves.append(curve)
 
-    # Curve must be sorted by P with strictly-increasing P
-    curve_sorted = curve.sort_values("p").drop_duplicates(subset="p", keep="first")
-    eq.create_curve_reactive_limits(
-        id=[new_gen_id] * len(curve_sorted),
-        p=curve_sorted["p"].tolist(),
-        min_q=curve_sorted["min_q"].tolist(),
-        max_q=curve_sorted["max_q"].tolist(),
-    )
-
-    return eq, curve
+    return eq, curves
 
 
 # ---------------------------------------------------------------------------

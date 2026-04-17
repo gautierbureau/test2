@@ -16,10 +16,14 @@ import pytest
 import pypowsybl.loadflow as lf
 
 from transport_curve import (
+    GeneratorSpec,
+    LossAllocation,
     build_test_network,
     build_node_breaker_network,
     build_node_breaker_network_full,
+    build_two_generators_network,
     build_equivalent_network,
+    build_equivalent_network_multi,
     get_oriented_transformer_params,
     transport_capability_curve,
     transport_point,
@@ -402,3 +406,280 @@ class TestNodeBreakerEquivalent:
         gen = eq.get_generators().loc["GEN_HV_EQ"]
         inj_p = -float(gen["p"])   # generator convention: -p = injected
         assert abs(inj_p - 383.680) < 0.5, f"HV generator P injection after LF: {inj_p:.3f}"
+
+
+# ---------------------------------------------------------------------------
+# Multi-generator tests: mirror of Java's EquivalentBuilderMultiTest
+# ---------------------------------------------------------------------------
+
+class TestEquivalentBuilderMulti:
+    """Integration tests for build_equivalent_network_multi with two generators."""
+
+    _LF_PARAMS = lf.Parameters(
+        voltage_init_mode=lf.VoltageInitMode.UNIFORM_VALUES,
+        transformer_voltage_control_on=False,
+        use_reactive_limits=True,
+        distributed_slack=False,
+    )
+
+    _SPECS_AB = [
+        GeneratorSpec("GEN_LV_A", "AUX_LOAD_A", "EQ_GEN_HV_A"),
+        GeneratorSpec("GEN_LV_B", "AUX_LOAD_B", "EQ_GEN_HV_B"),
+    ]
+
+    def test_original_equipment_present(self):
+        net = build_two_generators_network()
+        assert "GEN_LV_A" in net.get_generators().index
+        assert "GEN_LV_B" in net.get_generators().index
+        assert "AUX_LOAD_A" in net.get_loads().index
+        assert "AUX_LOAD_B" in net.get_loads().index
+        assert "TX" in net.get_2_windings_transformers().index
+
+    def test_equivalent_structure(self):
+        net = build_two_generators_network()
+        eq, curves = build_equivalent_network_multi(net, self._SPECS_AB, "TX", n_samples=11)
+
+        assert "GEN_LV_A"   not in eq.get_generators().index
+        assert "GEN_LV_B"   not in eq.get_generators().index
+        assert "AUX_LOAD_A" not in eq.get_loads().index
+        assert "AUX_LOAD_B" not in eq.get_loads().index
+        assert "TX"         not in eq.get_2_windings_transformers().index
+
+        gens = eq.get_generators(all_attributes=True)
+        assert "EQ_GEN_HV_A" in gens.index
+        assert "EQ_GEN_HV_B" in gens.index
+        assert gens.loc["EQ_GEN_HV_A", "voltage_level_id"] == "VL_HV"
+        assert gens.loc["EQ_GEN_HV_B", "voltage_level_id"] == "VL_HV"
+
+        assert len(curves) == 2
+        for curve in curves:
+            assert len(curve) == 11
+            diffs = curve["p"].diff().dropna()
+            assert (diffs > 0).all(), "Curve must be strictly increasing in P"
+
+    def test_generator_a_curve_matches_single_gen_reference(self):
+        """GEN_LV_A uses the same inputs as GEN_LV in the single-gen test network,
+        so its transported curve in INDEPENDENT mode must match those reference
+        values exactly."""
+        net = build_two_generators_network()
+        _, curves = build_equivalent_network_multi(net, self._SPECS_AB, "TX", n_samples=11)
+
+        first = curves[0].iloc[0]
+        assert abs(first["p"]     - (-15.524))  < TOLERANCE
+        assert abs(first["min_q"] - (-171.645)) < TOLERANCE
+        assert abs(first["max_q"] -   130.224)  < TOLERANCE
+
+        last = curves[0].iloc[-1]
+        assert abs(last["p"]     -  483.052)   < TOLERANCE
+        assert abs(last["min_q"] - (-163.709)) < TOLERANCE
+        assert abs(last["max_q"] -   56.822)   < TOLERANCE
+
+    def test_generator_b_curve_is_distinct(self):
+        net = build_two_generators_network()
+        _, curves = build_equivalent_network_multi(net, self._SPECS_AB, "TX", n_samples=11)
+        curve_b = curves[1]
+
+        p_max_b = float(curve_b["p"].iloc[-1])
+        assert p_max_b < 400.0, f"GEN_LV_B last HV P should reflect 400 MW max, got {p_max_b}"
+        assert p_max_b > 380.0, f"GEN_LV_B last HV P should be ~400 - 8 - losses, got {p_max_b}"
+
+        p_min_b = float(curve_b["p"].iloc[0])
+        assert p_min_b < 0.0, f"With P=0 and aux=8 MW, HV P must be negative, got {p_min_b}"
+        assert p_min_b > -15.0, f"HV P for P=0 should be close to -8 MW minus losses, got {p_min_b}"
+
+    def test_two_feeder_bays_created(self):
+        """TX bay removed (-2), two new gen bays added (+4): net +2 switches in VL_HV."""
+        net = build_two_generators_network()
+        before = len(net.get_node_breaker_topology("VL_HV").switches)
+
+        eq, _ = build_equivalent_network_multi(net, self._SPECS_AB, "TX", n_samples=11)
+
+        sw_after = eq.get_node_breaker_topology("VL_HV").switches
+        assert len(sw_after) == before + 2
+        assert "DISC_TX" not in sw_after.index
+        assert "BRK_TX"  not in sw_after.index
+
+        gens = eq.get_generators(all_attributes=True)
+        assert gens.loc["EQ_GEN_HV_A", "connected"]
+        assert gens.loc["EQ_GEN_HV_B", "connected"]
+
+    def test_load_flow_converges(self):
+        """Both HV equivalents connected: LF converges, sum of P injections
+        matches the transported LV net."""
+        net = build_two_generators_network()
+        eq, _ = build_equivalent_network_multi(net, self._SPECS_AB, "TX", n_samples=11)
+
+        res = lf.run_ac(eq, parameters=self._LF_PARAMS)
+        assert res[0].status_text == "Converged"
+
+        gens = eq.get_generators()
+        inj_p = -float(gens.loc["EQ_GEN_HV_A", "p"]) + -float(gens.loc["EQ_GEN_HV_B", "p"])
+        # 400 + 200 - 15 - 8 = 577 MW of LV net -> ~567-576 MW at HV
+        assert 560.0 < inj_p < 580.0, f"Sum of HV P injections: {inj_p:.3f}"
+
+    def test_single_spec_is_equivalent_to_legacy_build(self):
+        """A single-element specs list must behave identically to build_equivalent_network."""
+        a = build_node_breaker_network()
+        b = build_node_breaker_network()
+
+        _, legacy_curve = build_equivalent_network(
+            a, "GEN_LV", "TX", "AUX_LOAD", new_gen_id="GEN_HV_EQ", n_samples=11,
+        )
+        _, multi_curves = build_equivalent_network_multi(
+            b, [GeneratorSpec("GEN_LV", "AUX_LOAD", "GEN_HV_EQ")], "TX", n_samples=11,
+        )
+
+        import pandas as pd
+        pd.testing.assert_frame_equal(
+            legacy_curve[["p", "min_q", "max_q"]].reset_index(drop=True),
+            multi_curves[0][["p", "min_q", "max_q"]].reset_index(drop=True),
+            atol=1e-9, check_exact=False,
+        )
+
+    def test_duplicate_aux_load_id_rejected(self):
+        net = build_two_generators_network()
+        specs = [
+            GeneratorSpec("GEN_LV_A", "AUX_LOAD_A", "EQ_GEN_HV_A"),
+            GeneratorSpec("GEN_LV_B", "AUX_LOAD_A", "EQ_GEN_HV_B"),
+        ]
+        with pytest.raises(ValueError):
+            build_equivalent_network_multi(net, specs, "TX", n_samples=11)
+
+    def test_duplicate_new_id_rejected(self):
+        net = build_two_generators_network()
+        specs = [
+            GeneratorSpec("GEN_LV_A", "AUX_LOAD_A", "EQ_GEN_HV"),
+            GeneratorSpec("GEN_LV_B", "AUX_LOAD_B", "EQ_GEN_HV"),
+        ]
+        with pytest.raises(ValueError):
+            build_equivalent_network_multi(net, specs, "TX", n_samples=11)
+
+    def test_duplicate_generator_id_rejected(self):
+        net = build_two_generators_network()
+        specs = [
+            GeneratorSpec("GEN_LV_A", "AUX_LOAD_A", "EQ_GEN_HV_1"),
+            GeneratorSpec("GEN_LV_A", "AUX_LOAD_B", "EQ_GEN_HV_2"),
+        ]
+        with pytest.raises(ValueError):
+            build_equivalent_network_multi(net, specs, "TX", n_samples=11)
+
+    def test_empty_specs_rejected(self):
+        net = build_two_generators_network()
+        with pytest.raises(ValueError):
+            build_equivalent_network_multi(net, [], "TX", n_samples=11)
+
+    def test_single_spec_independent_equals_combined(self):
+        """Single-generator: COMBINED_PROPORTIONAL must match INDEPENDENT (weight=1)."""
+        a = build_node_breaker_network()
+        b = build_node_breaker_network()
+        specs = [GeneratorSpec("GEN_LV", "AUX_LOAD", "GEN_HV_EQ")]
+
+        _, c_ind = build_equivalent_network_multi(
+            a, specs, "TX", n_samples=11,
+            loss_allocation=LossAllocation.INDEPENDENT,
+        )
+        _, c_com = build_equivalent_network_multi(
+            b, specs, "TX", n_samples=11,
+            loss_allocation=LossAllocation.COMBINED_PROPORTIONAL,
+        )
+
+        import pandas as pd
+        pd.testing.assert_frame_equal(
+            c_ind[0][["p", "min_q", "max_q"]].reset_index(drop=True),
+            c_com[0][["p", "min_q", "max_q"]].reset_index(drop=True),
+            atol=1e-9, check_exact=False,
+        )
+
+    def test_two_gens_independent_vs_combined_differ(self):
+        """Two sizeable generators: policies must produce measurably different curves."""
+        a = build_two_generators_network()
+        b = build_two_generators_network()
+
+        _, c_ind = build_equivalent_network_multi(
+            a, self._SPECS_AB, "TX", n_samples=11,
+            loss_allocation=LossAllocation.INDEPENDENT,
+        )
+        _, c_com = build_equivalent_network_multi(
+            b, self._SPECS_AB, "TX", n_samples=11,
+            loss_allocation=LossAllocation.COMBINED_PROPORTIONAL,
+        )
+
+        found = False
+        for g in range(2):
+            d = (c_ind[g][["p", "min_q", "max_q"]].reset_index(drop=True) -
+                 c_com[g][["p", "min_q", "max_q"]].reset_index(drop=True)).abs()
+            if (d > 1e-3).any().any():
+                found = True
+                break
+        assert found, "COMBINED_PROPORTIONAL must differ from INDEPENDENT for two sizeable generators"
+
+    def test_combined_sum_equals_exact_combined_transport(self):
+        """Invariant: sum of per-gen HV P at sample i == average of exact combined
+        transports at the Qlo and Qhi extremes of that sample."""
+        net = build_two_generators_network()
+
+        tp = get_oriented_transformer_params(net, "TX")
+        gen_a = net.get_generators().loc["GEN_LV_A"]
+        gen_b = net.get_generators().loc["GEN_LV_B"]
+        v_lv = float(gen_a["target_v"])
+        p_min_a, p_max_a = float(gen_a["min_p"]), float(gen_a["max_p"])
+        p_min_b, p_max_b = float(gen_b["min_p"]), float(gen_b["max_p"])
+
+        cpts = net.get_reactive_capability_curve_points()
+        ca = cpts.loc["GEN_LV_A"].sort_values("p").reset_index(drop=True)
+        cb = cpts.loc["GEN_LV_B"].sort_values("p").reset_index(drop=True)
+
+        loads = net.get_loads()
+        p_aux_a = float(loads.loc["AUX_LOAD_A", "p0"])
+        q_aux_a = float(loads.loc["AUX_LOAD_A", "q0"])
+        p_aux_b = float(loads.loc["AUX_LOAD_B", "p0"])
+        q_aux_b = float(loads.loc["AUX_LOAD_B", "q0"])
+
+        _, curves = build_equivalent_network_multi(
+            net, self._SPECS_AB, "TX", n_samples=11,
+            loss_allocation=LossAllocation.COMBINED_PROPORTIONAL,
+        )
+        ca_curve = curves[0].sort_values("p").reset_index(drop=True)
+        cb_curve = curves[1].sort_values("p").reset_index(drop=True)
+
+        for i in range(11):
+            t = i / 10.0
+            p_a = p_min_a + t * (p_max_a - p_min_a)
+            p_b = p_min_b + t * (p_max_b - p_min_b)
+            q_lo_a = float(np.interp(p_a, ca["p"], ca["min_q"]))
+            q_lo_b = float(np.interp(p_b, cb["p"], cb["min_q"]))
+            q_hi_a = float(np.interp(p_a, ca["p"], ca["max_q"]))
+            q_hi_b = float(np.interp(p_b, cb["p"], cb["max_q"]))
+
+            p_lv   = (p_a   - p_aux_a) + (p_b   - p_aux_b)
+            q_lv_lo = (q_lo_a - q_aux_a) + (q_lo_b - q_aux_b)
+            q_lv_hi = (q_hi_a - q_aux_a) + (q_hi_b - q_aux_b)
+
+            p_hv_lo, _, _ = transport_point(
+                p_lv, q_lv_lo, v_lv,
+                tp["r"], tp["x"], tp["g"], tp["b"],
+                tp["rated_lv"], tp["rated_hv"], tp["rho_tap"],
+            )
+            p_hv_hi, _, _ = transport_point(
+                p_lv, q_lv_hi, v_lv,
+                tp["r"], tp["x"], tp["g"], tp["b"],
+                tp["rated_lv"], tp["rated_hv"], tp["rho_tap"],
+            )
+
+            p_sum = float(ca_curve["p"].iloc[i] + cb_curve["p"].iloc[i])
+            p_ref = 0.5 * (p_hv_lo + p_hv_hi)
+            assert abs(p_sum - p_ref) < 1e-6, \
+                f"Sum of HV P_i must equal the exact combined transport at sample {i}"
+
+    def test_combined_load_flow_converges(self):
+        net = build_two_generators_network()
+        eq, _ = build_equivalent_network_multi(
+            net, self._SPECS_AB, "TX", n_samples=11,
+            loss_allocation=LossAllocation.COMBINED_PROPORTIONAL,
+        )
+        res = lf.run_ac(eq, parameters=self._LF_PARAMS)
+        assert res[0].status_text == "Converged"
+
+        gens = eq.get_generators()
+        inj_p = -float(gens.loc["EQ_GEN_HV_A", "p"]) + -float(gens.loc["EQ_GEN_HV_B", "p"])
+        assert 560.0 < inj_p < 580.0, f"Sum of HV P injections: {inj_p:.3f}"
