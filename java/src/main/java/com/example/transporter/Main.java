@@ -14,6 +14,7 @@ import picocli.CommandLine.Option;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
 
@@ -56,6 +57,21 @@ public class Main implements Callable<Integer> {
             description = "ID for the new equivalent generator (default: ${DEFAULT-VALUE}).")
     private String newGeneratorId = "EQ_GEN_HV";
 
+    @Option(names = {"--generator-2"},
+            description = "ID of a second LV-side generator behind the same transformer. "
+                    + "When set, the tool runs in two-generator mode and produces two "
+                    + "independent HV equivalents.")
+    private String generatorId2;
+
+    @Option(names = {"--aux-load-2"},
+            description = "ID of the auxiliary load attached to the second generator "
+                    + "(optional). Must differ from --aux-load.")
+    private String auxLoadId2;
+
+    @Option(names = {"--new-id-2"},
+            description = "ID for the second new equivalent generator (default: ${DEFAULT-VALUE}).")
+    private String newGeneratorId2 = "EQ_GEN_HV_2";
+
     @Option(names = {"-s", "--samples"},
             description = "Number of curve points to generate (default: ${DEFAULT-VALUE}).")
     private int nSamples = 25;
@@ -80,27 +96,36 @@ public class Main implements Callable<Integer> {
                     network.getGeneratorCount(),
                     network.getLoadCount());
 
-            EquivalentBuilder.BuildResult result = EquivalentBuilder.build(
-                    network, generatorId, transformerId, auxLoadId,
-                    newGeneratorId, nSamples);
-
-            // Print the transported curve
-            System.out.println();
-            System.out.println("=".repeat(78));
-            System.out.println("Transported reactive capability curve (HV side, MW / MVar)");
-            System.out.println("=".repeat(78));
-            System.out.printf("%12s %12s %12s%n", "P", "Qmin", "Qmax");
-            for (CurveTransporter.HvCurvePoint pt : result.curve()) {
-                System.out.printf("%12.3f %12.3f %12.3f%n",
-                        pt.pHv(), pt.minQHv(), pt.maxQHv());
+            List<EquivalentBuilder.GeneratorSpec> specs = new ArrayList<>();
+            specs.add(new EquivalentBuilder.GeneratorSpec(generatorId, auxLoadId, newGeneratorId));
+            if (generatorId2 != null) {
+                specs.add(new EquivalentBuilder.GeneratorSpec(generatorId2, auxLoadId2, newGeneratorId2));
             }
-            System.out.printf("%nNew equivalent generator: id=%s, target P=%.3f MW, target Q=%.3f MVar%n",
-                    result.equivalentGenerator().getId(),
-                    result.equivalentGenerator().getTargetP(),
-                    result.equivalentGenerator().getTargetQ());
+            EquivalentBuilder.MultiBuildResult multiResult = EquivalentBuilder.buildMulti(
+                    network, specs, transformerId, nSamples);
+
+            // Print each transported curve
+            for (int i = 0; i < multiResult.perGenerator().size(); i++) {
+                EquivalentBuilder.BuildResult r = multiResult.perGenerator().get(i);
+                EquivalentBuilder.GeneratorSpec spec = specs.get(i);
+                System.out.println();
+                System.out.println("=".repeat(78));
+                System.out.printf("Transported curve for %s -> %s (HV side, MW / MVar)%n",
+                        spec.generatorId(), spec.newGeneratorId());
+                System.out.println("=".repeat(78));
+                System.out.printf("%12s %12s %12s%n", "P", "Qmin", "Qmax");
+                for (CurveTransporter.HvCurvePoint pt : r.curve()) {
+                    System.out.printf("%12.3f %12.3f %12.3f%n",
+                            pt.pHv(), pt.minQHv(), pt.maxQHv());
+                }
+                System.out.printf("%nNew equivalent generator: id=%s, target P=%.3f MW, target Q=%.3f MVar%n",
+                        r.equivalentGenerator().getId(),
+                        r.equivalentGenerator().getTargetP(),
+                        r.equivalentGenerator().getTargetQ());
+            }
 
             if (validate) {
-                runValidation(network);
+                runValidation(network, multiResult);
             }
 
             // Make sure the parent directory exists
@@ -119,8 +144,8 @@ public class Main implements Callable<Integer> {
         }
     }
 
-    /** Run an AC load flow and print convergence + the new generator's flow. */
-    private void runValidation(Network network) {
+    /** Run an AC load flow and print convergence + each new generator's flow. */
+    private void runValidation(Network network, EquivalentBuilder.MultiBuildResult multiResult) {
         LOGGER.info("Running AC load flow on the equivalent network");
         LoadFlowParameters params = new LoadFlowParameters()
                 .setUseReactiveLimits(true)
@@ -140,14 +165,16 @@ public class Main implements Callable<Integer> {
                     cr.getIterationCount(),
                     cr.getSlackBusActivePowerMismatch());
         }
-        var eqGen = network.getGenerator(newGeneratorId);
-        // Generator convention: P,Q from getP/getQ are receiver convention,
-        // so the actual injection into the bus is the negative.
-        double injP = -eqGen.getTerminal().getP();
-        double injQ = -eqGen.getTerminal().getQ();
-        double vHv = eqGen.getTerminal().getBusBreakerView().getBus().getV();
-        System.out.printf("Equivalent generator injection : P = %.3f MW, Q = %.3f MVar at V = %.3f kV%n",
-                injP, injQ, vHv);
+        for (EquivalentBuilder.BuildResult r : multiResult.perGenerator()) {
+            var eqGen = r.equivalentGenerator();
+            // Generator convention: P,Q from getP/getQ are receiver convention,
+            // so the actual injection into the bus is the negative.
+            double injP = -eqGen.getTerminal().getP();
+            double injQ = -eqGen.getTerminal().getQ();
+            double vHv = eqGen.getTerminal().getBusBreakerView().getBus().getV();
+            System.out.printf("Equivalent generator %s injection : P = %.3f MW, Q = %.3f MVar at V = %.3f kV%n",
+                    eqGen.getId(), injP, injQ, vHv);
+        }
     }
 
     public static void main(String[] args) {
