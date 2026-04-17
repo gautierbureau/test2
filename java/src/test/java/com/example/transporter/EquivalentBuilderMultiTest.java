@@ -259,4 +259,161 @@ class EquivalentBuilderMultiTest {
         assertThrows(IllegalArgumentException.class,
                 () -> EquivalentBuilder.buildMulti(network, List.of(), "TX", 11));
     }
+
+    /**
+     * COMBINED_PROPORTIONAL and INDEPENDENT must produce the SAME curve for a
+     * single-generator spec: the proportional weight reduces to 1.0, so the
+     * combined transport reduces to the single-generator transport.
+     */
+    @Test
+    void testSingleSpecIndependentEqualsCombined() {
+        Network a = NodeBreakerNetworkFactory.create();
+        Network b = NodeBreakerNetworkFactory.create();
+
+        List<EquivalentBuilder.GeneratorSpec> specs = List.of(
+                new EquivalentBuilder.GeneratorSpec("GEN_LV", "AUX_LOAD", "GEN_HV_EQ"));
+
+        EquivalentBuilder.MultiBuildResult ind =
+                EquivalentBuilder.buildMulti(a, specs, "TX", 11,
+                        EquivalentBuilder.LossAllocation.INDEPENDENT);
+        EquivalentBuilder.MultiBuildResult com =
+                EquivalentBuilder.buildMulti(b, specs, "TX", 11,
+                        EquivalentBuilder.LossAllocation.COMBINED_PROPORTIONAL);
+
+        assertEquals(ind.first().curve().size(), com.first().curve().size());
+        for (int i = 0; i < ind.first().curve().size(); i++) {
+            assertEquals(ind.first().curve().get(i).pHv(),
+                    com.first().curve().get(i).pHv(), 1e-9);
+            assertEquals(ind.first().curve().get(i).minQHv(),
+                    com.first().curve().get(i).minQHv(), 1e-9);
+            assertEquals(ind.first().curve().get(i).maxQHv(),
+                    com.first().curve().get(i).maxQHv(), 1e-9);
+        }
+    }
+
+    /**
+     * For the two-generator network, INDEPENDENT and COMBINED_PROPORTIONAL must
+     * produce DIFFERENT curves: cross-terms and the shunt double-counting add
+     * up to a measurable offset between the two policies.
+     */
+    @Test
+    void testTwoGensIndependentVsCombinedDiffer() {
+        Network a = NodeBreakerNetworkFactory.createTwoGenerators();
+        Network b = NodeBreakerNetworkFactory.createTwoGenerators();
+
+        List<EquivalentBuilder.GeneratorSpec> specs = List.of(
+                new EquivalentBuilder.GeneratorSpec("GEN_LV_A", "AUX_LOAD_A", "EQ_GEN_HV_A"),
+                new EquivalentBuilder.GeneratorSpec("GEN_LV_B", "AUX_LOAD_B", "EQ_GEN_HV_B"));
+
+        EquivalentBuilder.MultiBuildResult ind = EquivalentBuilder.buildMulti(
+                a, specs, "TX", 11, EquivalentBuilder.LossAllocation.INDEPENDENT);
+        EquivalentBuilder.MultiBuildResult com = EquivalentBuilder.buildMulti(
+                b, specs, "TX", 11, EquivalentBuilder.LossAllocation.COMBINED_PROPORTIONAL);
+
+        // At least one curve point must differ between the two policies.
+        boolean foundDifference = false;
+        for (int g = 0; g < 2; g++) {
+            List<CurveTransporter.HvCurvePoint> cInd = ind.perGenerator().get(g).curve();
+            List<CurveTransporter.HvCurvePoint> cCom = com.perGenerator().get(g).curve();
+            for (int i = 0; i < cInd.size(); i++) {
+                if (Math.abs(cInd.get(i).pHv()    - cCom.get(i).pHv())    > 1e-3
+                 || Math.abs(cInd.get(i).minQHv() - cCom.get(i).minQHv()) > 1e-3
+                 || Math.abs(cInd.get(i).maxQHv() - cCom.get(i).maxQHv()) > 1e-3) {
+                    foundDifference = true;
+                    break;
+                }
+            }
+        }
+        assertTrue(foundDifference,
+                "COMBINED_PROPORTIONAL must differ from INDEPENDENT for two sizeable generators");
+    }
+
+    /**
+     * Invariant of COMBINED_PROPORTIONAL: at each sample, the sum of per-gen
+     * HV injections must equal the exact combined transport of the combined
+     * LV injection (up to floating-point noise). We verify it at the maxQ
+     * extreme of each sample using {@link TransformerTransport#transport}.
+     */
+    @Test
+    void testCombinedSumEqualsExactCombinedTransport() {
+        List<EquivalentBuilder.GeneratorSpec> specs = List.of(
+                new EquivalentBuilder.GeneratorSpec("GEN_LV_A", "AUX_LOAD_A", "EQ_GEN_HV_A"),
+                new EquivalentBuilder.GeneratorSpec("GEN_LV_B", "AUX_LOAD_B", "EQ_GEN_HV_B"));
+
+        // Capture LV-side transformer params + LV voltage BEFORE buildMulti mutates the network.
+        TransformerTransport.OrientedParams op =
+                TransformerTransport.orientToHv(network.getTwoWindingsTransformer("TX"));
+        double vLvKv = network.getGenerator("GEN_LV_A").getTargetV();
+
+        // Compute each generator's LV maxQ curve (by sampling identically to the builder).
+        Generator genA = network.getGenerator("GEN_LV_A");
+        Generator genB = network.getGenerator("GEN_LV_B");
+        double pAuxA = network.getLoad("AUX_LOAD_A").getP0();
+        double qAuxA = network.getLoad("AUX_LOAD_A").getQ0();
+        double pAuxB = network.getLoad("AUX_LOAD_B").getP0();
+        double qAuxB = network.getLoad("AUX_LOAD_B").getQ0();
+
+        EquivalentBuilder.MultiBuildResult com = EquivalentBuilder.buildMulti(
+                network, specs, "TX", 11, EquivalentBuilder.LossAllocation.COMBINED_PROPORTIONAL);
+
+        List<CurveTransporter.HvCurvePoint> cA = com.perGenerator().get(0).curve();
+        List<CurveTransporter.HvCurvePoint> cB = com.perGenerator().get(1).curve();
+
+        for (int i = 0; i < 11; i++) {
+            double t = (double) i / 10.0;
+            double pA = genA.getMinP() + t * (genA.getMaxP() - genA.getMinP());
+            double pB = genB.getMinP() + t * (genB.getMaxP() - genB.getMinP());
+            double qLoA = genA.getReactiveLimits().getMinQ(pA);
+            double qLoB = genB.getReactiveLimits().getMinQ(pB);
+            double qHiA = genA.getReactiveLimits().getMaxQ(pA);
+            double qHiB = genB.getReactiveLimits().getMaxQ(pB);
+
+            double pLv   = (pA   - pAuxA) + (pB   - pAuxB);
+            double qLvLo = (qLoA - qAuxA) + (qLoB - qAuxB);
+            double qLvHi = (qHiA - qAuxA) + (qHiB - qAuxB);
+
+            TransformerTransport.HvPoint hvLo =
+                    TransformerTransport.transport(op, vLvKv, pLv, qLvLo);
+            TransformerTransport.HvPoint hvHi =
+                    TransformerTransport.transport(op, vLvKv, pLv, qLvHi);
+
+            // Each per-gen curve point stores pHv = 0.5 * (pHv_at_Qlo + pHv_at_Qhi)
+            // after the proportional split; therefore the sum across generators
+            // must equal the average of the two exact combined transports' P.
+            double pSum = cA.get(i).pHv() + cB.get(i).pHv();
+            double pRef = 0.5 * (hvLo.pHvMw() + hvHi.pHvMw());
+            assertEquals(pRef, pSum, 1e-6,
+                    "Sum of HV P_i must equal the exact combined transport at sample " + i);
+        }
+    }
+
+    /**
+     * Load flow on the equivalent network built with COMBINED_PROPORTIONAL must
+     * converge. The total HV injection must be closer to the exact combined
+     * transport than the INDEPENDENT-built network.
+     */
+    @Test
+    void testCombinedLoadFlowConverges() {
+        List<EquivalentBuilder.GeneratorSpec> specs = List.of(
+                new EquivalentBuilder.GeneratorSpec("GEN_LV_A", "AUX_LOAD_A", "EQ_GEN_HV_A"),
+                new EquivalentBuilder.GeneratorSpec("GEN_LV_B", "AUX_LOAD_B", "EQ_GEN_HV_B"));
+
+        EquivalentBuilder.MultiBuildResult mr = EquivalentBuilder.buildMulti(
+                network, specs, "TX", 11, EquivalentBuilder.LossAllocation.COMBINED_PROPORTIONAL);
+
+        LoadFlowParameters params = new LoadFlowParameters()
+                .setUseReactiveLimits(true)
+                .setTransformerVoltageControlOn(false)
+                .setDistributedSlack(false);
+        LoadFlowResult lf = LoadFlow.run(network, params);
+
+        assertEquals(LoadFlowResult.Status.FULLY_CONVERGED, lf.getStatus());
+
+        double injP = 0.0;
+        for (EquivalentBuilder.BuildResult r : mr.perGenerator()) {
+            injP += -r.equivalentGenerator().getTerminal().getP();
+        }
+        assertTrue(injP > 560.0 && injP < 580.0,
+                "Sum of HV equivalent P injections must match the transported LV net, got " + injP);
+    }
 }

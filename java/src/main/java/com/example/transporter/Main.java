@@ -76,6 +76,15 @@ public class Main implements Callable<Integer> {
             description = "Number of curve points to generate (default: ${DEFAULT-VALUE}).")
     private int nSamples = 25;
 
+    @Option(names = {"--loss-allocation"},
+            description = "How to split transformer losses when more than one generator is "
+                    + "provided. INDEPENDENT (default) transports each generator as if alone; "
+                    + "COMBINED_PROPORTIONAL transports the combined LV injection once and "
+                    + "splits losses proportionally to |S_i|^2. For a single generator the "
+                    + "two policies give identical results. Valid values: ${COMPLETION-CANDIDATES}")
+    private EquivalentBuilder.LossAllocation lossAllocation =
+            EquivalentBuilder.LossAllocation.INDEPENDENT;
+
     @Option(names = {"--validate"},
             description = "Run an AC load flow on the equivalent network after building it.")
     private boolean validate = false;
@@ -102,7 +111,7 @@ public class Main implements Callable<Integer> {
                 specs.add(new EquivalentBuilder.GeneratorSpec(generatorId2, auxLoadId2, newGeneratorId2));
             }
             EquivalentBuilder.MultiBuildResult multiResult = EquivalentBuilder.buildMulti(
-                    network, specs, transformerId, nSamples);
+                    network, specs, transformerId, nSamples, lossAllocation);
 
             // Print each transported curve
             for (int i = 0; i < multiResult.perGenerator().size(); i++) {
