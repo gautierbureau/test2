@@ -44,7 +44,7 @@ _EXPORT_IIDM_VERSION = "1.15"
 
 
 # ---------------------------------------------------------------------------
-#  1.  Build a small test network
+#  1.  Build test networks
 # ---------------------------------------------------------------------------
 def build_test_network() -> pn.Network:
     """Build a 400 kV / 20 kV test network with one generator and aux load."""
@@ -157,6 +157,181 @@ def build_test_network() -> pn.Network:
         g=[g],
         r=[r],
         x=[x],
+    )
+
+    return net
+
+
+def build_node_breaker_network() -> pn.Network:
+    """
+    Electrically identical to build_test_network() but with VL_HV in
+    NODE_BREAKER topology.
+
+    VL_HV (400 kV, NODE_BREAKER):
+      node 0  BusbarSection BBS_HV
+      DISC_EXT  0-1  |  BRK_EXT  1-2  |  EXT_GRID at 2
+      DISC_LOAD 0-3  |  BRK_LOAD 3-4  |  HV_LOAD  at 4
+      DISC_TX   0-5  |  BRK_TX   5-6  |  TX (HV terminal) at 6
+
+    VL_LV (20 kV, BUS_BREAKER):
+      bus BUS_LV  —  GEN_LV, AUX_LOAD, TX (LV terminal)
+    """
+    net = pn.create_empty("test_nb")
+    net.create_substations(id=["S_MAIN"])
+
+    net.create_voltage_levels(
+        id=["VL_HV"], substation_id=["S_MAIN"],
+        topology_kind=["NODE_BREAKER"], nominal_v=[400.0],
+    )
+    net.create_busbar_sections(id=["BBS_HV"], voltage_level_id=["VL_HV"], node=[0])
+
+    net.create_switches(id=["DISC_EXT"],  voltage_level_id=["VL_HV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[1], open=[False])
+    net.create_switches(id=["BRK_EXT"],   voltage_level_id=["VL_HV"],
+                        kind=["BREAKER"],      node1=[1], node2=[2], open=[False])
+    net.create_generators(
+        id=["EXT_GRID"], voltage_level_id=["VL_HV"], node=[2],
+        min_p=[-5000.0], max_p=[5000.0], target_p=[0.0],
+        target_v=[400.0], target_q=[0.0], voltage_regulator_on=[True],
+    )
+    net.create_minmax_reactive_limits(id=["EXT_GRID"], min_q=[-5000.0], max_q=[5000.0])
+
+    net.create_switches(id=["DISC_LOAD"], voltage_level_id=["VL_HV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[3], open=[False])
+    net.create_switches(id=["BRK_LOAD"],  voltage_level_id=["VL_HV"],
+                        kind=["BREAKER"],      node1=[3], node2=[4], open=[False])
+    net.create_loads(id=["HV_LOAD"], voltage_level_id=["VL_HV"], node=[4],
+                     p0=[200.0], q0=[40.0])
+
+    net.create_switches(id=["DISC_TX"],   voltage_level_id=["VL_HV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[5], open=[False])
+    net.create_switches(id=["BRK_TX"],    voltage_level_id=["VL_HV"],
+                        kind=["BREAKER"],      node1=[5], node2=[6], open=[False])
+
+    net.create_voltage_levels(
+        id=["VL_LV"], substation_id=["S_MAIN"],
+        topology_kind=["BUS_BREAKER"], nominal_v=[20.0],
+    )
+    net.create_buses(id=["BUS_LV"], voltage_level_id=["VL_LV"])
+
+    net.create_generators(
+        id=["GEN_LV"], voltage_level_id=["VL_LV"], bus_id=["BUS_LV"],
+        min_p=[0.0], max_p=[500.0], target_p=[400.0],
+        target_v=[20.5], target_q=[0.0], voltage_regulator_on=[True],
+    )
+    p_pts = [0.0, 100.0, 300.0, 500.0]
+    net.create_curve_reactive_limits(
+        id=["GEN_LV"] * 4, p=p_pts,
+        min_q=[-150.0, -200.0, -180.0, -100.0],
+        max_q=[ 150.0,  250.0,  220.0,  120.0],
+    )
+
+    net.create_loads(id=["AUX_LOAD"], voltage_level_id=["VL_LV"], bus_id=["BUS_LV"],
+                     p0=[15.0], q0=[5.0])
+
+    sn = 600.0
+    zb_lv = 20.0 ** 2 / sn
+    yb_lv = 1.0 / zb_lv
+    net.create_2_windings_transformers(
+        id=["TX"],
+        voltage_level1_id=["VL_HV"], node1=[6],
+        voltage_level2_id=["VL_LV"], bus2_id=["BUS_LV"],
+        rated_u1=[400.0], rated_u2=[20.0], rated_s=[sn],
+        r=[0.004 * zb_lv], x=[0.12  * zb_lv],
+        g=[0.0006 * yb_lv], b=[-0.018 * yb_lv],
+    )
+
+    return net
+
+
+def build_node_breaker_network_full() -> pn.Network:
+    """
+    Same as build_node_breaker_network() but with VL_LV also in NODE_BREAKER.
+
+    VL_LV (20 kV, NODE_BREAKER):
+      node 0  BusbarSection BBS_LV
+      DISC_GEN_LV  0-1  |  BRK_GEN_LV  1-2  |  GEN_LV   at 2
+      DISC_AUX_LV  0-3  |  BRK_AUX_LV  3-4  |  AUX_LOAD at 4
+      DISC_TX_LV   0-5  |  BRK_TX_LV   5-6  |  TX (LV terminal) at 6
+    """
+    net = pn.create_empty("test_nb_full")
+    net.create_substations(id=["S_MAIN"])
+
+    # HV — identical to build_node_breaker_network()
+    net.create_voltage_levels(
+        id=["VL_HV"], substation_id=["S_MAIN"],
+        topology_kind=["NODE_BREAKER"], nominal_v=[400.0],
+    )
+    net.create_busbar_sections(id=["BBS_HV"], voltage_level_id=["VL_HV"], node=[0])
+
+    net.create_switches(id=["DISC_EXT"],  voltage_level_id=["VL_HV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[1], open=[False])
+    net.create_switches(id=["BRK_EXT"],   voltage_level_id=["VL_HV"],
+                        kind=["BREAKER"],      node1=[1], node2=[2], open=[False])
+    net.create_generators(
+        id=["EXT_GRID"], voltage_level_id=["VL_HV"], node=[2],
+        min_p=[-5000.0], max_p=[5000.0], target_p=[0.0],
+        target_v=[400.0], target_q=[0.0], voltage_regulator_on=[True],
+    )
+    net.create_minmax_reactive_limits(id=["EXT_GRID"], min_q=[-5000.0], max_q=[5000.0])
+
+    net.create_switches(id=["DISC_LOAD"], voltage_level_id=["VL_HV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[3], open=[False])
+    net.create_switches(id=["BRK_LOAD"],  voltage_level_id=["VL_HV"],
+                        kind=["BREAKER"],      node1=[3], node2=[4], open=[False])
+    net.create_loads(id=["HV_LOAD"], voltage_level_id=["VL_HV"], node=[4],
+                     p0=[200.0], q0=[40.0])
+
+    net.create_switches(id=["DISC_TX"],   voltage_level_id=["VL_HV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[5], open=[False])
+    net.create_switches(id=["BRK_TX"],    voltage_level_id=["VL_HV"],
+                        kind=["BREAKER"],      node1=[5], node2=[6], open=[False])
+
+    # LV — node breaker
+    net.create_voltage_levels(
+        id=["VL_LV"], substation_id=["S_MAIN"],
+        topology_kind=["NODE_BREAKER"], nominal_v=[20.0],
+    )
+    net.create_busbar_sections(id=["BBS_LV"], voltage_level_id=["VL_LV"], node=[0])
+
+    net.create_switches(id=["DISC_GEN_LV"], voltage_level_id=["VL_LV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[1], open=[False])
+    net.create_switches(id=["BRK_GEN_LV"],  voltage_level_id=["VL_LV"],
+                        kind=["BREAKER"],      node1=[1], node2=[2], open=[False])
+    net.create_generators(
+        id=["GEN_LV"], voltage_level_id=["VL_LV"], node=[2],
+        min_p=[0.0], max_p=[500.0], target_p=[400.0],
+        target_v=[20.5], target_q=[0.0], voltage_regulator_on=[True],
+    )
+    p_pts = [0.0, 100.0, 300.0, 500.0]
+    net.create_curve_reactive_limits(
+        id=["GEN_LV"] * 4, p=p_pts,
+        min_q=[-150.0, -200.0, -180.0, -100.0],
+        max_q=[ 150.0,  250.0,  220.0,  120.0],
+    )
+
+    net.create_switches(id=["DISC_AUX_LV"], voltage_level_id=["VL_LV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[3], open=[False])
+    net.create_switches(id=["BRK_AUX_LV"],  voltage_level_id=["VL_LV"],
+                        kind=["BREAKER"],      node1=[3], node2=[4], open=[False])
+    net.create_loads(id=["AUX_LOAD"], voltage_level_id=["VL_LV"], node=[4],
+                     p0=[15.0], q0=[5.0])
+
+    net.create_switches(id=["DISC_TX_LV"],  voltage_level_id=["VL_LV"],
+                        kind=["DISCONNECTOR"], node1=[0], node2=[5], open=[False])
+    net.create_switches(id=["BRK_TX_LV"],   voltage_level_id=["VL_LV"],
+                        kind=["BREAKER"],      node1=[5], node2=[6], open=[False])
+
+    sn = 600.0
+    zb_lv = 20.0 ** 2 / sn
+    yb_lv = 1.0 / zb_lv
+    net.create_2_windings_transformers(
+        id=["TX"],
+        voltage_level1_id=["VL_HV"], node1=[6],
+        voltage_level2_id=["VL_LV"], node2=[6],
+        rated_u1=[400.0], rated_u2=[20.0], rated_s=[sn],
+        r=[0.004 * zb_lv], x=[0.12  * zb_lv],
+        g=[0.0006 * yb_lv], b=[-0.018 * yb_lv],
     )
 
     return net
@@ -403,17 +578,96 @@ def transport_capability_curve(
 # ---------------------------------------------------------------------------
 #  4.  Build the equivalent network
 # ---------------------------------------------------------------------------
+
+def _get_terminal_nodes(
+    network: pn.Network, element_id: str
+) -> list[tuple[str, int]]:
+    """
+    Return [(vl_id, node), ...] for every terminal of element_id that sits in
+    a NODE_BREAKER voltage level.  Bus-breaker terminals (node == -1) and
+    bus-breaker VLs are excluded.
+    """
+    vl_df = network.get_voltage_levels(all_attributes=True)
+
+    # Generator / load: single terminal
+    for getter in (network.get_generators, network.get_loads):
+        df = getter(all_attributes=True)
+        if element_id in df.index:
+            vl_id = df.loc[element_id, "voltage_level_id"]
+            if vl_df.loc[vl_id, "topology_kind"] == "NODE_BREAKER":
+                node = int(df.loc[element_id, "node"])
+                if node >= 0:
+                    return [(vl_id, node)]
+            return []
+
+    # Two-winding transformer: two terminals
+    txs = network.get_2_windings_transformers(all_attributes=True)
+    if element_id in txs.index:
+        tx = txs.loc[element_id]
+        result = []
+        for vl_col, node_col in [
+            ("voltage_level1_id", "node1"),
+            ("voltage_level2_id", "node2"),
+        ]:
+            vl_id = tx[vl_col]
+            if vl_df.loc[vl_id, "topology_kind"] == "NODE_BREAKER":
+                node = int(tx[node_col])
+                if node >= 0:
+                    result.append((vl_id, node))
+        return result
+
+    return []
+
+
+def _remove_element_and_feeder_bay(
+    network: pn.Network, element_id: str
+) -> None:
+    """
+    Remove *element_id* from the network together with the disconnector and
+    breaker that form its feeder bay in any NODE_BREAKER voltage level.
+
+    In BUS_BREAKER voltage levels the element is simply removed; there are no
+    feeder bay switches to clean up.
+    """
+    switches_to_remove: list[str] = []
+
+    for vl_id, elem_node in _get_terminal_nodes(network, element_id):
+        topo = network.get_node_breaker_topology(vl_id)
+        sw = topo.switches
+
+        # The switch directly connected to the element node is the breaker.
+        direct = sw[(sw["node1"] == elem_node) | (sw["node2"] == elem_node)]
+        for sw_id, row in direct.iterrows():
+            switches_to_remove.append(sw_id)
+            # Intermediate node between the breaker and the disconnector
+            other = int(row["node2"]) if int(row["node1"]) == elem_node \
+                    else int(row["node1"])
+            # The disconnector connects the intermediate node to the busbar.
+            indirect = sw[
+                ((sw["node1"] == other) | (sw["node2"] == other)) &
+                (~sw.index.isin([sw_id]))
+            ]
+            switches_to_remove.extend(indirect.index.tolist())
+
+    network.remove_elements([element_id] + switches_to_remove)
+
+
 def build_equivalent_network(
     original: pn.Network,
     generator_id: str,
     transformer_id: str,
-    aux_load_id: str,
+    aux_load_id: str | None,
     new_gen_id: str = "GEN_HV_EQ",
     n_samples: int = 25,
 ) -> tuple[pn.Network, pd.DataFrame]:
     """
     Returns a (network, curve_df) pair where the equivalent generator on the
     HV bus carries the transported curve.
+
+    Both BUS_BREAKER and NODE_BREAKER topologies are supported on the HV side.
+    When the HV (or LV) voltage level uses NODE_BREAKER, feeder bay switches
+    are cleaned up automatically and the new generator is wired via a proper
+    disconnector + breaker bay.
     """
     # Read the LV regulating setpoint as the assumed LV voltage
     gen = original.get_generators().loc[generator_id]
@@ -427,10 +681,6 @@ def build_equivalent_network(
     # Oriented transformer parameters (HV-referred)
     tp = get_oriented_transformer_params(original, transformer_id)
 
-    # Clone the network, then strip the LV-side equipment
-    eq = pn.load_from_string("equivalent.xiidm", original.save_to_string())
-    eq.remove_elements([generator_id, aux_load_id, transformer_id])
-
     # Active-power range from the transported curve
     p_min_eq = float(curve["p"].min())
     p_max_eq = float(curve["p"].max())
@@ -438,25 +688,67 @@ def build_equivalent_network(
     # Operating point: transport the original generator's target (P, Q)
     p_target_orig = float(gen["target_p"])
     q_target_orig = float(gen["target_q"])
-    p_aux = float(original.get_loads().loc[aux_load_id, "p0"])
-    q_aux = float(original.get_loads().loc[aux_load_id, "q0"])
+    p_aux = float(original.get_loads().loc[aux_load_id, "p0"]) if aux_load_id else 0.0
+    q_aux = float(original.get_loads().loc[aux_load_id, "q0"]) if aux_load_id else 0.0
     p_op_hv, q_op_hv, _ = transport_point(
         p_target_orig - p_aux, q_target_orig - q_aux, v_lv,
         tp["r"], tp["x"], tp["g"], tp["b"],
         tp["rated_lv"], tp["rated_hv"], tp["rho_tap"],
     )
 
-    eq.create_generators(
-        id=[new_gen_id],
-        voltage_level_id=[tp["hv_vl_id"]],
-        bus_id=[tp["hv_bus_id"]],
-        min_p=[p_min_eq],
-        max_p=[p_max_eq],
-        target_p=[p_op_hv],
-        target_q=[q_op_hv],
-        target_v=[tp["nom_hv"]],
-        voltage_regulator_on=[False],   # behave as PQ to match original injection
-    )
+    # Clone the network, then strip the LV-side equipment.
+    # _remove_element_and_feeder_bay cleans up feeder bay switches in
+    # NODE_BREAKER voltage levels and is a no-op on that layer for BUS_BREAKER.
+    eq = pn.load_from_string("equivalent.xiidm", original.save_to_string())
+    _remove_element_and_feeder_bay(eq, generator_id)
+    if aux_load_id is not None:
+        _remove_element_and_feeder_bay(eq, aux_load_id)
+    _remove_element_and_feeder_bay(eq, transformer_id)
+
+    # Determine HV voltage level topology
+    hv_vl_id = tp["hv_vl_id"]
+    hv_topology = eq.get_voltage_levels(all_attributes=True).loc[
+        hv_vl_id, "topology_kind"
+    ]
+
+    if hv_topology == "NODE_BREAKER":
+        # Find the busbar section node and the highest node currently in use.
+        topo = eq.get_node_breaker_topology(hv_vl_id)
+        bbs_node = int(
+            topo.nodes[topo.nodes["connectable_type"] == "BUSBAR_SECTION"].index[0]
+        )
+        sw = topo.switches
+        max_node = int(max(sw["node1"].max(), sw["node2"].max())) if len(sw) else bbs_node
+
+        n_intermediate = max_node + 1
+        n_gen = max_node + 2
+
+        eq.create_switches(
+            id=[f"DISC_{new_gen_id}"], voltage_level_id=[hv_vl_id],
+            kind=["DISCONNECTOR"], node1=[bbs_node], node2=[n_intermediate], open=[False],
+        )
+        eq.create_switches(
+            id=[f"BRK_{new_gen_id}"], voltage_level_id=[hv_vl_id],
+            kind=["BREAKER"], node1=[n_intermediate], node2=[n_gen], open=[False],
+        )
+        eq.create_generators(
+            id=[new_gen_id], voltage_level_id=[hv_vl_id], node=[n_gen],
+            min_p=[p_min_eq], max_p=[p_max_eq],
+            target_p=[p_op_hv], target_q=[q_op_hv],
+            target_v=[tp["nom_hv"]], voltage_regulator_on=[False],
+        )
+    else:
+        eq.create_generators(
+            id=[new_gen_id],
+            voltage_level_id=[hv_vl_id],
+            bus_id=[tp["hv_bus_id"]],
+            min_p=[p_min_eq],
+            max_p=[p_max_eq],
+            target_p=[p_op_hv],
+            target_q=[q_op_hv],
+            target_v=[tp["nom_hv"]],
+            voltage_regulator_on=[False],
+        )
 
     # Curve must be sorted by P with strictly-increasing P
     curve_sorted = curve.sort_values("p").drop_duplicates(subset="p", keep="first")
