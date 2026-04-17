@@ -77,8 +77,9 @@ class EquivalentBuilderNodeBreakerTest {
     }
 
     /**
-     * CreateFeederBay must have added exactly 2 new switches (disconnector + breaker)
-     * for the equivalent generator's feeder bay.
+     * RemoveFeederBay must clean up the TX feeder bay switches from VL_HV, and
+     * CreateFeederBay must add a new disconnector + breaker for the equivalent
+     * generator. Net switch count stays the same (-2 from TX bay, +2 for EQ_GEN bay).
      */
     @Test
     void testNodeBreakerSwitchesCreated() {
@@ -87,9 +88,42 @@ class EquivalentBuilderNodeBreakerTest {
 
         EquivalentBuilder.build(network, "GEN_LV", "TX", "AUX_LOAD", "GEN_HV_EQ", 11);
 
+        // TX HV feeder bay removed by RemoveFeederBay
+        assertNull(network.getSwitch("DISC_TX"), "TX HV disconnector must be removed");
+        assertNull(network.getSwitch("BRK_TX"),  "TX HV breaker must be removed");
+
+        // Net switch count: -2 (TX bay removed) +2 (EQ_GEN bay added) = unchanged
         long afterCount = hvVl.getNodeBreakerView().getSwitchStream().count();
-        assertEquals(beforeCount + 2, afterCount,
-                "CreateFeederBay must add exactly 2 switches (disconnector + breaker)");
+        assertEquals(beforeCount, afterCount, "Net switch count in VL_HV must be unchanged");
+
+        // Equivalent generator is reachable via the bus view (connected through bay)
+        assertNotNull(network.getGenerator("GEN_HV_EQ").getTerminal().getBusBreakerView().getBus(),
+                "Equivalent generator must be connected to a bus");
+    }
+
+    /**
+     * When the LV voltage level is also in node-breaker topology, RemoveFeederBay
+     * must clean up all feeder bay switches (GEN_LV bay + AUX_LOAD bay + TX LV bay),
+     * leaving only the busbar section in VL_LV.
+     */
+    @Test
+    void testNodeBreakerLvFeederBaysRemoved() {
+        Network nb = NodeBreakerNetworkFactory.createWithNodeBreakerLv();
+        VoltageLevel lvVl = nb.getVoltageLevel("VL_LV");
+
+        assertEquals(6, lvVl.getNodeBreakerView().getSwitchCount(),
+                "VL_LV must start with 6 switches (2 per feeder bay × 3 feeders)");
+
+        EquivalentBuilder.build(nb, "GEN_LV", "TX", "AUX_LOAD", "GEN_HV_EQ", 11);
+
+        assertEquals(0, lvVl.getNodeBreakerView().getSwitchCount(),
+                "All LV feeder bay switches must be removed by RemoveFeederBay");
+        assertNull(nb.getSwitch("DISC_GEN_LV"), "GEN_LV disconnector must be removed");
+        assertNull(nb.getSwitch("BRK_GEN_LV"),  "GEN_LV breaker must be removed");
+        assertNull(nb.getSwitch("DISC_AUX_LV"), "AUX_LOAD disconnector must be removed");
+        assertNull(nb.getSwitch("BRK_AUX_LV"),  "AUX_LOAD breaker must be removed");
+        assertNull(nb.getSwitch("DISC_TX_LV"),  "TX LV disconnector must be removed");
+        assertNull(nb.getSwitch("BRK_TX_LV"),   "TX LV breaker must be removed");
     }
 
     /**
