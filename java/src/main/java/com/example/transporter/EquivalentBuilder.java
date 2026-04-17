@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -22,11 +23,20 @@ import java.util.Set;
  * through its own new disconnector + breaker bay to the HV busbar section;
  * for bus-breaker, to the same bus the transformer's HV terminal used.
  *
- * <p>When multiple generators share a transformer, each is transported
- * independently at the assumed LV voltage (typically each generator's
- * regulating setpoint). The per-generator transport is exact as long as
- * the LV bus voltage is fixed - which is the working assumption of this
- * tool - so no cross-coupling correction is needed.
+ * <p>For the multi-generator case, two loss-allocation policies are available
+ * via {@link LossAllocation}:
+ * <ul>
+ *   <li>{@link LossAllocation#INDEPENDENT} - each generator is transported as
+ *       if it were alone on the LV bus. Series (copper) losses are attributed
+ *       to each generator proportionally to {@code |S_i|^2}; shunt (magnetizing)
+ *       losses are counted once per generator, so the sum of equivalents
+ *       double-counts the shunt. Cross-terms between generators are dropped.
+ *   <li>{@link LossAllocation#COMBINED_PROPORTIONAL} - the combined LV injection
+ *       is transported once, and the resulting HV losses are split between
+ *       generators proportionally to {@code |S_i|^2}. Sum of HV equivalents
+ *       equals the exact combined transport; for a single generator the two
+ *       policies produce identical results.
+ * </ul>
  */
 public final class EquivalentBuilder {
 
@@ -56,6 +66,17 @@ public final class EquivalentBuilder {
         public BuildResult first() {
             return perGenerator.get(0);
         }
+    }
+
+    /** Policy for allocating transformer losses between generators. */
+    public enum LossAllocation {
+        /** Each generator transported independently; losses attributed per-generator. */
+        INDEPENDENT,
+        /**
+         * Combined LV injection transported once; resulting HV losses split
+         * between generators proportionally to {@code |S_i|^2}.
+         */
+        COMBINED_PROPORTIONAL
     }
 
     /**
@@ -99,9 +120,26 @@ public final class EquivalentBuilder {
                                               List<GeneratorSpec> specs,
                                               String transformerId,
                                               int nSamples) {
+        return buildMulti(network, specs, transformerId, nSamples, LossAllocation.INDEPENDENT);
+    }
+
+    /**
+     * Variant of {@link #buildMulti(Network, List, String, int)} that lets the
+     * caller pick the {@link LossAllocation} policy. The policy only matters
+     * when {@code specs.size() > 1}; for a single generator the two policies
+     * produce identical results.
+     */
+    public static MultiBuildResult buildMulti(Network network,
+                                              List<GeneratorSpec> specs,
+                                              String transformerId,
+                                              int nSamples,
+                                              LossAllocation lossAllocation) {
 
         if (specs == null || specs.isEmpty()) {
             throw new IllegalArgumentException("At least one generator spec is required");
+        }
+        if (lossAllocation == null) {
+            throw new IllegalArgumentException("lossAllocation must not be null");
         }
 
         TwoWindingsTransformer tx = network.getTwoWindingsTransformer(transformerId);
@@ -137,9 +175,14 @@ public final class EquivalentBuilder {
         TransformerTransport.OrientedParams op = TransformerTransport.orientToHv(tx);
 
         // Transport every generator first - all reads happen before any mutation.
-        List<PerGenData> perGen = new ArrayList<>(specs.size());
-        for (GeneratorSpec spec : specs) {
-            perGen.add(prepare(network, tx, op, spec, nSamples));
+        List<PerGenData> perGen;
+        if (lossAllocation == LossAllocation.COMBINED_PROPORTIONAL) {
+            perGen = prepareCombinedProportional(network, tx, op, specs, nSamples);
+        } else {
+            perGen = new ArrayList<>(specs.size());
+            for (GeneratorSpec spec : specs) {
+                perGen.add(prepare(network, tx, op, spec, nSamples));
+            }
         }
 
         // Capture HV-side topology before the transformer is removed.
@@ -265,6 +308,185 @@ public final class EquivalentBuilder {
         double pMaxEq = curve.stream().mapToDouble(CurveTransporter.HvCurvePoint::pHv).max().orElseThrow();
 
         return new PerGenData(spec, curve, opHv, pMinEq, pMaxEq);
+    }
+
+    /**
+     * Transport all generators jointly: the combined LV injection is transported
+     * once per (sample, Q-extremum), and the resulting HV losses are split
+     * between generators proportionally to {@code |S_i|^2}. This makes the sum
+     * of the equivalent HV injections equal to the exact combined transport.
+     */
+    private static List<PerGenData> prepareCombinedProportional(
+            Network network,
+            TwoWindingsTransformer tx,
+            TransformerTransport.OrientedParams op,
+            List<GeneratorSpec> specs,
+            int nSamples) {
+
+        if (nSamples < 2) {
+            throw new IllegalArgumentException("nSamples must be >= 2");
+        }
+
+        int n = specs.size();
+        Generator[] gens = new Generator[n];
+        double[] pAux = new double[n];
+        double[] qAux = new double[n];
+        double[] pMinGen = new double[n];
+        double[] pMaxGen = new double[n];
+        ReactiveLimits[] limits = new ReactiveLimits[n];
+
+        double vLvKv = Double.NaN;
+        for (int g = 0; g < n; g++) {
+            GeneratorSpec spec = specs.get(g);
+            Generator gen = network.getGenerator(spec.generatorId());
+            if (gen == null) {
+                throw new IllegalArgumentException("Generator not found: " + spec.generatorId());
+            }
+            Load aux = (spec.auxLoadId() != null) ? network.getLoad(spec.auxLoadId()) : null;
+            if (spec.auxLoadId() != null && aux == null) {
+                throw new IllegalArgumentException("Auxiliary load not found: " + spec.auxLoadId());
+            }
+            gens[g] = gen;
+            pAux[g] = (aux != null) ? aux.getP0() : 0.0;
+            qAux[g] = (aux != null) ? aux.getQ0() : 0.0;
+            pMinGen[g] = gen.getMinP();
+            pMaxGen[g] = gen.getMaxP();
+            limits[g] = gen.getReactiveLimits();
+
+            // All generators share the same LV bus, so they must regulate the
+            // same voltage. Use the first valid targetV; warn on mismatch.
+            double vi = gen.getTargetV();
+            if (Double.isNaN(vi) || vi <= 0.0) {
+                vi = gen.getTerminal().getVoltageLevel().getNominalV();
+            }
+            if (Double.isNaN(vLvKv)) {
+                vLvKv = vi;
+            } else if (Math.abs(vi - vLvKv) > 1e-3) {
+                LOGGER.warn("Generator {} targetV={} kV disagrees with LV voltage {} kV "
+                        + "used for combined transport", spec.generatorId(), vi, vLvKv);
+            }
+        }
+
+        // Per-generator HV curves, filled as we sweep t over [0, 1].
+        List<List<CurveTransporter.HvCurvePoint>> perGenCurves = new ArrayList<>(n);
+        for (int g = 0; g < n; g++) {
+            perGenCurves.add(new ArrayList<>(nSamples));
+        }
+
+        for (int i = 0; i < nSamples; i++) {
+            double t = (double) i / (nSamples - 1);
+
+            double[] pGen = new double[n];
+            double[] qMinOrig = new double[n];
+            double[] qMaxOrig = new double[n];
+            double pLvCombined = 0.0;
+            double qLvLoCombined = 0.0;
+            double qLvHiCombined = 0.0;
+            for (int g = 0; g < n; g++) {
+                pGen[g] = pMinGen[g] + t * (pMaxGen[g] - pMinGen[g]);
+                qMinOrig[g] = limits[g].getMinQ(pGen[g]);
+                qMaxOrig[g] = limits[g].getMaxQ(pGen[g]);
+                pLvCombined   += pGen[g]      - pAux[g];
+                qLvLoCombined += qMinOrig[g]  - qAux[g];
+                qLvHiCombined += qMaxOrig[g]  - qAux[g];
+            }
+
+            TransformerTransport.HvPoint hvLo = TransformerTransport.transport(
+                    op, vLvKv, pLvCombined, qLvLoCombined);
+            TransformerTransport.HvPoint hvHi = TransformerTransport.transport(
+                    op, vLvKv, pLvCombined, qLvHiCombined);
+
+            double pLossLo = pLvCombined   - hvLo.pHvMw();
+            double qLossLo = qLvLoCombined - hvLo.qHvMvar();
+            double pLossHi = pLvCombined   - hvHi.pHvMw();
+            double qLossHi = qLvHiCombined - hvHi.qHvMvar();
+
+            double[] wLo = computeS2Weights(pGen, qMinOrig, pAux, qAux);
+            double[] wHi = computeS2Weights(pGen, qMaxOrig, pAux, qAux);
+
+            for (int g = 0; g < n; g++) {
+                double pHvLo = (pGen[g]     - pAux[g]) - wLo[g] * pLossLo;
+                double qHvLo = (qMinOrig[g] - qAux[g]) - wLo[g] * qLossLo;
+                double pHvHi = (pGen[g]     - pAux[g]) - wHi[g] * pLossHi;
+                double qHvHi = (qMaxOrig[g] - qAux[g]) - wHi[g] * qLossHi;
+
+                double pHv = 0.5 * (pHvLo + pHvHi);
+                double qMinHv = Math.min(qHvLo, qHvHi);
+                double qMaxHv = Math.max(qHvLo, qHvHi);
+                perGenCurves.get(g).add(new CurveTransporter.HvCurvePoint(pHv, qMinHv, qMaxHv));
+            }
+        }
+
+        // Enforce strictly increasing P on each equivalent curve.
+        for (List<CurveTransporter.HvCurvePoint> curve : perGenCurves) {
+            curve.sort(Comparator.comparingDouble(CurveTransporter.HvCurvePoint::pHv));
+            for (int i = 1; i < curve.size(); i++) {
+                CurveTransporter.HvCurvePoint prev = curve.get(i - 1);
+                CurveTransporter.HvCurvePoint cur = curve.get(i);
+                if (cur.pHv() - prev.pHv() < 1e-6) {
+                    curve.set(i, new CurveTransporter.HvCurvePoint(
+                            prev.pHv() + 1e-6, cur.minQHv(), cur.maxQHv()));
+                }
+            }
+        }
+
+        // Transport the combined operating point and split it the same way.
+        double pLvOp = 0.0;
+        double qLvOp = 0.0;
+        double[] pGenOp = new double[n];
+        double[] qGenOp = new double[n];
+        for (int g = 0; g < n; g++) {
+            pGenOp[g] = gens[g].getTargetP();
+            qGenOp[g] = gens[g].getTargetQ();
+            pLvOp += pGenOp[g] - pAux[g];
+            qLvOp += qGenOp[g] - qAux[g];
+        }
+        TransformerTransport.HvPoint hvOp = TransformerTransport.transport(op, vLvKv, pLvOp, qLvOp);
+        double pLossOp = pLvOp - hvOp.pHvMw();
+        double qLossOp = qLvOp - hvOp.qHvMvar();
+        double[] wOp = computeS2Weights(pGenOp, qGenOp, pAux, qAux);
+
+        List<PerGenData> perGen = new ArrayList<>(n);
+        for (int g = 0; g < n; g++) {
+            List<CurveTransporter.HvCurvePoint> curve = perGenCurves.get(g);
+            TransformerTransport.HvPoint opHv = new TransformerTransport.HvPoint(
+                    (pGenOp[g] - pAux[g]) - wOp[g] * pLossOp,
+                    (qGenOp[g] - qAux[g]) - wOp[g] * qLossOp,
+                    hvOp.vHvKv());
+            double pMinEq = curve.stream().mapToDouble(CurveTransporter.HvCurvePoint::pHv).min().orElseThrow();
+            double pMaxEq = curve.stream().mapToDouble(CurveTransporter.HvCurvePoint::pHv).max().orElseThrow();
+            perGen.add(new PerGenData(specs.get(g), curve, opHv, pMinEq, pMaxEq));
+        }
+        return perGen;
+    }
+
+    /**
+     * Compute split weights proportional to {@code |S_i|^2} where
+     * {@code S_i = (P_i - P_aux_i) + j(Q_i - Q_aux_i)}. The returned weights
+     * sum to 1. If every {@code |S_i|^2} is zero, the weight falls back to a
+     * uniform {@code 1/n} split.
+     */
+    private static double[] computeS2Weights(double[] pGen, double[] qGen,
+                                             double[] pAux, double[] qAux) {
+        int n = pGen.length;
+        double[] w = new double[n];
+        double sum = 0.0;
+        for (int g = 0; g < n; g++) {
+            double p = pGen[g] - pAux[g];
+            double q = qGen[g] - qAux[g];
+            w[g] = p * p + q * q;
+            sum += w[g];
+        }
+        if (sum < 1e-12) {
+            for (int g = 0; g < n; g++) {
+                w[g] = 1.0 / n;
+            }
+            return w;
+        }
+        for (int g = 0; g < n; g++) {
+            w[g] /= sum;
+        }
+        return w;
     }
 
     /** Return the transformer terminal corresponding to the HV side. */
