@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<iidm:network xmlns:iidm="http://www.powsybl.org/schema/iidm/1_15" id="test_aux_equivalent" caseDate="2026-04-17T12:35:43.125Z" forecastDistance="0" sourceFormat="" minimumValidationLevel="STEADY_STATE_HYPOTHESIS">
+    <iidm:substation id="S_MAIN">
+        <iidm:voltageLevel id="VL_HV" nominalV="400.0" topologyKind="BUS_BREAKER">
+            <iidm:busBreakerTopology>
+                <iidm:bus id="BUS_HV"/>
+            </iidm:busBreakerTopology>
+            <iidm:generator id="EXT_GRID" energySource="OTHER" minP="-5000.0" maxP="5000.0" voltageRegulatorOn="true" targetP="0.0" targetV="400.0" targetQ="0.0" bus="BUS_HV" connectableBus="BUS_HV">
+                <iidm:minMaxReactiveLimits minQ="-5000.0" maxQ="5000.0"/>
+            </iidm:generator>
+            <iidm:load id="HV_LOAD" loadType="UNDEFINED" p0="200.0" q0="40.0" bus="BUS_HV" connectableBus="BUS_HV"/>
+        </iidm:voltageLevel>
+        <iidm:voltageLevel id="VL_LV" nominalV="20.0" topologyKind="BUS_BREAKER">
+            <iidm:busBreakerTopology>
+                <iidm:bus id="BUS_LV"/>
+            </iidm:busBreakerTopology>
+            <iidm:generator id="GEN_LV" energySource="OTHER" minP="0.0" maxP="500.0" voltageRegulatorOn="true" targetP="400.0" targetV="20.5" targetQ="0.0" bus="BUS_LV" connectableBus="BUS_LV">
+                <iidm:reactiveCapabilityCurve>
+                    <iidm:point p="0.0" minQ="-150.0" maxQ="150.0"/>
+                    <iidm:point p="100.0" minQ="-200.0" maxQ="250.0"/>
+                    <iidm:point p="300.0" minQ="-180.0" maxQ="220.0"/>
+                    <iidm:point p="500.0" minQ="-100.0" maxQ="120.0"/>
+                </iidm:reactiveCapabilityCurve>
+            </iidm:generator>
+            <iidm:load id="AUX_LOAD" loadType="UNDEFINED" p0="15.0" q0="5.0" bus="BUS_LV" connectableBus="BUS_LV"/>
+        </iidm:voltageLevel>
+        <iidm:twoWindingsTransformer id="TX" r="0.0026666666666666666" x="0.07999999999999999" g="9.0E-4" b="-0.026999999999999996" ratedU1="400.0" ratedU2="20.0" ratedS="600.0" voltageLevelId1="VL_HV" bus1="BUS_HV" connectableBus1="BUS_HV" voltageLevelId2="VL_LV" bus2="BUS_LV" connectableBus2="BUS_LV"/>
+    </iidm:substation>
+</iidm:network>

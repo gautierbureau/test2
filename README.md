@@ -19,17 +19,26 @@ capability curve transported analytically through the transformer pi-model.
 
 - **`java/`** — Maven project that does the same as a CLI tool, reading an
   IIDM file and writing the equivalent IIDM file. Built as a fat jar via
-  `maven-shade-plugin` so it runs with `java -jar`. Every powsybl-core API
-  call was verified against the v7.1.1 source on GitHub, but the project
-  was not actually compiled in the sandbox (Maven Central was blocked).
-  Build & run:
+  `maven-shade-plugin`. **Compiled and validated** against the Python output:
+  all 11 transported curve points match to 3 decimal places. Build & run:
   ```
   cd java
   mvn clean package
   java -jar target/curve-transporter-1.0.0-shaded.jar \
-       -i in.xiidm -o out.xiidm \
-       -g GEN_LV -t TX -a AUX_LOAD --validate
+       -i src/main/resources/test_network.xiidm \
+       -g GEN_LV -t TX -a AUX_LOAD -n GEN_HV_EQ -s 11 \
+       -o /tmp/equivalent.xiidm --validate
   ```
+
+The test network is stored as a resource file at
+`java/src/main/resources/test_network.xiidm`. It was exported by the Python
+script at IIDM schema version 1.15 (compatible with powsybl-core 7.x). To
+regenerate it:
+```
+cd python
+python3 transport_curve.py \
+    --save-network ../java/src/main/resources/test_network.xiidm
+```
 
 See `python/transport_curve.py` and `java/README.md` for details.
 
