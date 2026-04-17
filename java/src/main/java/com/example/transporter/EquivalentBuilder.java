@@ -1,6 +1,7 @@
 package com.example.transporter;
 
 import com.powsybl.iidm.modification.topology.CreateFeederBayBuilder;
+import com.powsybl.iidm.modification.topology.RemoveFeederBay;
 import com.powsybl.iidm.network.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -113,12 +114,15 @@ public final class EquivalentBuilder {
         double pMaxEq = curve.stream().mapToDouble(CurveTransporter.HvCurvePoint::pHv).max()
                 .orElseThrow();
 
+        // RemoveFeederBay removes the connectable AND its feeder bay switches in
+        // node-breaker voltage levels; it is a safe no-op on the switch layer for
+        // bus-breaker voltage levels.
         LOGGER.info("Removing original LV-side equipment");
-        gen.remove();
-        if (auxLoad != null) {
-            auxLoad.remove();
+        new RemoveFeederBay(generatorId).apply(network);
+        if (auxLoadId != null) {
+            new RemoveFeederBay(auxLoadId).apply(network);
         }
-        tx.remove();
+        new RemoveFeederBay(transformerId).apply(network);
 
         LOGGER.info("Creating equivalent generator {} on voltage level {} (V_nom={} kV)",
                 newGeneratorId, hvVl.getId(), nomHv);
