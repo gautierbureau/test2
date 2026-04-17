@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Python: unit + integration tests
+  # --------------------------------------------------------------------------
+  python:
+    name: Python tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r python/requirements.txt
+
+      - name: Run pytest
+        run: python -m pytest python/tests/ -v --tb=short
+
+  # --------------------------------------------------------------------------
+  # Java: compile + unit + integration tests
+  # --------------------------------------------------------------------------
+  java:
+    name: Java tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Cache Maven local repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('java/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Build and test
+        run: mvn -f java/pom.xml test -B

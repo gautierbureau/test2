@@ -1,0 +1,4 @@
+pypowsybl>=1.5
+numpy
+pandas
+pytest>=7.0
