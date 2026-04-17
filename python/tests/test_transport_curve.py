@@ -17,6 +17,8 @@ import pypowsybl.loadflow as lf
 
 from transport_curve import (
     build_test_network,
+    build_node_breaker_network,
+    build_node_breaker_network_full,
     build_equivalent_network,
     get_oriented_transformer_params,
     transport_capability_curve,
@@ -232,6 +234,7 @@ class TestEquivalentNetworkIntegration:
         assert "GEN_LV" in reloaded.get_generators().index
 
     def test_resource_file_matches_python_network(self):
+
         """
         The committed resource file test_network.xiidm must produce the same
         transported curve as building the network from scratch in Python.
@@ -254,3 +257,148 @@ class TestEquivalentNetworkIntegration:
             df_code[["p", "min_q", "max_q"]].reset_index(drop=True),
             atol=TOLERANCE, check_exact=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: node-breaker topology (HV and full)
+# ---------------------------------------------------------------------------
+
+class TestNodeBreakerEquivalent:
+    """
+    Mirror of EquivalentBuilderNodeBreakerTest.java.
+
+    Uses build_node_breaker_network()  (HV NB, LV BB) and
+         build_node_breaker_network_full() (both NB).
+    Curve values and LF results must match the bus-breaker reference because
+    the electrical content is identical.
+    """
+
+    _LF_PARAMS = lf.Parameters(
+        voltage_init_mode=lf.VoltageInitMode.UNIFORM_VALUES,
+        transformer_voltage_control_on=False,
+        use_reactive_limits=True,
+        distributed_slack=False,
+    )
+
+    def test_network_topology_kind(self):
+        """VL_HV must be NODE_BREAKER and contain a busbar section."""
+        net = build_node_breaker_network()
+        vl_df = net.get_voltage_levels(all_attributes=True)
+        assert vl_df.loc["VL_HV", "topology_kind"] == "NODE_BREAKER"
+
+        topo = net.get_node_breaker_topology("VL_HV")
+        bbs = topo.nodes[topo.nodes["connectable_type"] == "BUSBAR_SECTION"]
+        assert len(bbs) > 0, "VL_HV must contain a busbar section"
+
+    def test_original_equipment_present(self):
+        """All original LV equipment must be present before the build."""
+        net = build_node_breaker_network()
+        assert "GEN_LV"  in net.get_generators().index
+        assert "AUX_LOAD" in net.get_loads().index
+        assert "TX"       in net.get_2_windings_transformers().index
+
+    def test_equivalent_structure(self):
+        """
+        After building the equivalent:
+          - LV equipment is removed
+          - New HV generator exists inside VL_HV
+          - Curve has 11 points and strictly increasing P
+        """
+        net = build_node_breaker_network()
+        eq, curve = build_equivalent_network(
+            net, "GEN_LV", "TX", "AUX_LOAD", new_gen_id="GEN_HV_EQ", n_samples=11
+        )
+
+        assert "GEN_LV"  not in eq.get_generators().index,          "Original generator must be removed"
+        assert "AUX_LOAD" not in eq.get_loads().index,               "Auxiliary load must be removed"
+        assert "TX"       not in eq.get_2_windings_transformers().index, "Transformer must be removed"
+
+        gens = eq.get_generators(all_attributes=True)
+        assert "GEN_HV_EQ" in gens.index, "Equivalent generator must exist"
+        assert gens.loc["GEN_HV_EQ", "voltage_level_id"] == "VL_HV", \
+            "Generator must be in VL_HV"
+
+        assert len(curve) == 11, "Curve must have 11 points"
+        diffs = curve["p"].diff().dropna()
+        assert (diffs > 0).all(), "Curve P must be strictly increasing"
+
+    def test_node_breaker_switches(self):
+        """
+        RemoveFeederBay cleans up the TX bay (−2 switches); the new generator
+        bay adds 2.  Net switch count in VL_HV is unchanged.
+        """
+        net = build_node_breaker_network()
+        before = len(net.get_node_breaker_topology("VL_HV").switches)
+
+        eq, _ = build_equivalent_network(
+            net, "GEN_LV", "TX", "AUX_LOAD", new_gen_id="GEN_HV_EQ", n_samples=11
+        )
+
+        sw_after = eq.get_node_breaker_topology("VL_HV").switches
+        assert "DISC_TX" not in sw_after.index, "TX HV disconnector must be removed"
+        assert "BRK_TX"  not in sw_after.index, "TX HV breaker must be removed"
+        assert len(sw_after) == before, "Net switch count in VL_HV must be unchanged"
+
+        # Equivalent generator must be reachable via a calculated bus
+        gens = eq.get_generators(all_attributes=True)
+        assert gens.loc["GEN_HV_EQ", "connected"], \
+            "Equivalent generator must be connected"
+
+    def test_lv_feeder_bays_removed(self):
+        """
+        When VL_LV is also NODE_BREAKER, all 6 LV feeder bay switches must
+        be removed (2 per feeder × 3 feeders: GEN_LV, AUX_LOAD, TX LV side).
+        """
+        net = build_node_breaker_network_full()
+        assert len(net.get_node_breaker_topology("VL_LV").switches) == 6, \
+            "VL_LV must start with 6 switches"
+
+        eq, _ = build_equivalent_network(
+            net, "GEN_LV", "TX", "AUX_LOAD", new_gen_id="GEN_HV_EQ", n_samples=11
+        )
+
+        sw_lv = eq.get_node_breaker_topology("VL_LV").switches
+        assert len(sw_lv) == 0, "All LV feeder bay switches must be removed"
+        for sw_id in ["DISC_GEN_LV", "BRK_GEN_LV",
+                      "DISC_AUX_LV", "BRK_AUX_LV",
+                      "DISC_TX_LV",  "BRK_TX_LV"]:
+            assert sw_id not in sw_lv.index, f"{sw_id} must be removed"
+
+    def test_curve_values(self):
+        """
+        Transported curve values must match the bus-breaker reference
+        (same electrical data).
+        """
+        net = build_node_breaker_network()
+        _, curve = build_equivalent_network(
+            net, "GEN_LV", "TX", "AUX_LOAD", new_gen_id="GEN_HV_EQ", n_samples=11
+        )
+
+        first = curve.iloc[0]
+        assert abs(first["p"]     - (-15.524))  < TOLERANCE, "First P_hv"
+        assert abs(first["min_q"] - (-171.645)) < TOLERANCE, "First Qmin_hv"
+        assert abs(first["max_q"] -   130.224)  < TOLERANCE, "First Qmax_hv"
+
+        last = curve.iloc[-1]
+        assert abs(last["p"]     -  483.052)   < TOLERANCE, "Last P_hv"
+        assert abs(last["min_q"] - (-163.709)) < TOLERANCE, "Last Qmin_hv"
+        assert abs(last["max_q"] -   56.822)   < TOLERANCE, "Last Qmax_hv"
+
+    def test_load_flow_converges(self):
+        """
+        The equivalent node-breaker network must converge under AC load flow,
+        and the equivalent generator P injection must match the transported
+        operating point within 0.5 MW.
+        """
+        net = build_node_breaker_network()
+        eq, _ = build_equivalent_network(
+            net, "GEN_LV", "TX", "AUX_LOAD", new_gen_id="GEN_HV_EQ", n_samples=11
+        )
+
+        res = lf.run_ac(eq, parameters=self._LF_PARAMS)
+        assert res[0].status_text == "Converged", \
+            "Load flow must converge on the equivalent node-breaker network"
+
+        gen = eq.get_generators().loc["GEN_HV_EQ"]
+        inj_p = -float(gen["p"])   # generator convention: -p = injected
+        assert abs(inj_p - 383.680) < 0.5, f"HV generator P injection after LF: {inj_p:.3f}"
