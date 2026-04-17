@@ -1,0 +1,11 @@
+# Maven build output
+java/target/
+
+# Leftover JAR extraction from manual inspection
+java/META-INF/
+
+# Python bytecode
+python/__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
