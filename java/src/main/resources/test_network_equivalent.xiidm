@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<iidm:network xmlns:iidm="http://www.powsybl.org/schema/iidm/1_15" id="test_aux_equivalent" caseDate="2026-04-17T12:35:43.125Z" forecastDistance="0" sourceFormat="" minimumValidationLevel="STEADY_STATE_HYPOTHESIS">
+    <iidm:substation id="S_MAIN">
+        <iidm:voltageLevel id="VL_HV" nominalV="400.0" topologyKind="BUS_BREAKER">
+            <iidm:busBreakerTopology>
+                <iidm:bus id="BUS_HV"/>
+            </iidm:busBreakerTopology>
+            <iidm:generator id="EXT_GRID" energySource="OTHER" minP="-5000.0" maxP="5000.0" voltageRegulatorOn="true" targetP="0.0" targetV="400.0" targetQ="0.0" bus="BUS_HV" connectableBus="BUS_HV">
+                <iidm:minMaxReactiveLimits minQ="-5000.0" maxQ="5000.0"/>
+            </iidm:generator>
+            <iidm:generator id="HV_GEN_LV" energySource="OTHER" minP="-15.523687677612534" maxP="483.0518870831885" voltageRegulatorOn="false" targetP="383.6801589140194" targetV="400.0" targetQ="-44.59523257941701" bus="BUS_HV" connectableBus="BUS_HV">
+                <iidm:reactiveCapabilityCurve>
+                    <iidm:point p="-15.523687677612534" minQ="-171.64479210826892" maxQ="130.22353145151695"/>
+                    <iidm:point p="5.280507733859915" minQ="-182.7037692217595" maxQ="149.95089992002116"/>
+                    <iidm:point p="26.075732989230396" minQ="-193.96974993760327" maxQ="169.34706262476038"/>
+                    <iidm:point p="46.861988088498904" minQ="-205.4427342558001" maxQ="188.4120195657347"/>
+                    <iidm:point p="67.63927303166543" minQ="-217.12272217635" maxQ="207.145770742944"/>
+                    <iidm:point p="88.4182144685303" minQ="-226.30257492249322" maxQ="221.1871097009782"/>
+                    <iidm:point p="109.23270856358121" minQ="-224.83702934895885" maxQ="217.54954316383112"/>
+                    <iidm:point p="130.0415928610083" minQ="-223.53874268612594" maxQ="213.74264767995905"/>
+                    <iidm:point p="150.8448673608117" minQ="-222.40771493399433" maxQ="209.76642324936216"/>
+                    <iidm:point p="171.64253206299128" minQ="-221.4439460925639" maxQ="205.6208698720405"/>
+                    <iidm:point p="192.4345869675471" minQ="-220.64743616183486" maxQ="201.30598754799388"/>
+                    <iidm:point p="213.22103207447913" minQ="-220.01818514180712" maxQ="196.82177627722254"/>
+                    <iidm:point p="234.0018673837874" minQ="-219.55619303248065" maxQ="192.16823605972633"/>
+                    <iidm:point p="254.77709289547195" minQ="-219.2614598338555" maxQ="187.34536689550535"/>
+                    <iidm:point p="275.54670860953263" minQ="-219.1339855459316" maxQ="182.35316878455947"/>
+                    <iidm:point p="296.3208752175729" minQ="-215.147341800119" maxQ="173.14985485449137"/>
+                    <iidm:point p="317.095372287886" minQ="-208.66354373177342" maxQ="161.05254767159764"/>
+                    <iidm:point p="337.8632176424434" minQ="-202.37184500641155" maxQ="148.74823688635075"/>
+                    <iidm:point p="358.62441128124533" minQ="-196.2722456240333" maxQ="136.23692249875074"/>
+                    <iidm:point p="379.3789532042915" minQ="-190.3647455846388" maxQ="123.51860450879771"/>
+                    <iidm:point p="400.1268434115822" minQ="-184.64934488822792" maxQ="110.59328291649153"/>
+                    <iidm:point p="420.8680819031172" minQ="-179.12604353480071" maxQ="97.46095772183224"/>
+                    <iidm:point p="441.60266867889663" minQ="-173.79484152435722" maxQ="84.12162892481989"/>
+                    <iidm:point p="462.33060373892044" minQ="-168.65573885689736" maxQ="70.57529652545443"/>
+                    <iidm:point p="483.0518870831885" minQ="-163.70873553242117" maxQ="56.821960523735896"/>
+                </iidm:reactiveCapabilityCurve>
+            </iidm:generator>
+            <iidm:load id="HV_LOAD" loadType="UNDEFINED" p0="200.0" q0="40.0" bus="BUS_HV" connectableBus="BUS_HV"/>
+        </iidm:voltageLevel>
+        <iidm:voltageLevel id="VL_LV" nominalV="20.0" topologyKind="BUS_BREAKER">
+            <iidm:busBreakerTopology>
+                <iidm:bus id="BUS_LV"/>
+            </iidm:busBreakerTopology>
+        </iidm:voltageLevel>
+    </iidm:substation>
+</iidm:network>
