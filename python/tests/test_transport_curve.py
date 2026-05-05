@@ -15,13 +15,15 @@ import numpy as np
 import pytest
 import pypowsybl.loadflow as lf
 
+from network_factory import (
+    build_node_breaker_network,
+    build_node_breaker_network_full,
+    build_test_network,
+    build_two_generators_network,
+)
 from transport_curve import (
     GeneratorSpec,
     LossAllocation,
-    build_test_network,
-    build_node_breaker_network,
-    build_node_breaker_network_full,
-    build_two_generators_network,
     build_equivalent_network,
     build_equivalent_network_multi,
     get_oriented_transformer_params,
