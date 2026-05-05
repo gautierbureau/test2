@@ -309,6 +309,205 @@ def build_svg(
 
 
 # ---------------------------------------------------------------------------
+# Multi-curve overlay SVG
+# ---------------------------------------------------------------------------
+
+def build_svg_overlay(
+    curves: list[dict],
+    title: str = "",
+    subtitle: str = "",
+) -> ET.ElementTree:
+    """Build a single SVG with multiple capability envelopes overlaid.
+
+    Each element of *curves* must contain:
+      ``label``        – legend entry text
+      ``p_pts``        – list[float] of P values (MW)
+      ``qmin_pts``     – list[float] of Qmin values (MVar)
+      ``qmax_pts``     – list[float] of Qmax values (MVar)
+      ``fill_color``   – SVG fill color string (e.g. ``"#b8d4f0"``)
+      ``stroke_color`` – SVG stroke color string
+    Optionally:
+      ``fill_opacity``  – float, default 0.45
+    """
+    # ---- combined axis ranges
+    all_p = [v for c in curves for v in c["p_pts"]]
+    all_q = [v for c in curves for v in c["qmin_pts"] + c["qmax_pts"]]
+    p_lo, p_hi = min(all_p), max(all_p)
+    q_lo, q_hi = min(all_q), max(all_q)
+    p_pad = max((p_hi - p_lo) * 0.05, 1.0)
+    q_pad = max((q_hi - q_lo) * 0.08, 1.0)
+    p_range = (p_lo - p_pad, p_hi + p_pad)
+    q_range = (q_lo - q_pad, q_hi + q_pad)
+
+    def to_px(p, q):
+        return _px(p, q, p_range, q_range)
+
+    root = ET.Element("svg", {
+        "xmlns": "http://www.w3.org/2000/svg",
+        "width": str(_W), "height": str(_H),
+        "viewBox": f"0 0 {_W} {_H}",
+    })
+    ET.SubElement(root, "rect", {
+        "x": "0", "y": "0", "width": str(_W), "height": str(_H),
+        "fill": _C_BG,
+    })
+
+    # ---- grid
+    p_ticks = _nice_ticks(p_range[0], p_range[1])
+    q_ticks = _nice_ticks(q_range[0], q_range[1])
+    for pt in p_ticks:
+        x, _ = to_px(pt, q_range[0])
+        ET.SubElement(root, "line", {"x1": f"{x:.1f}", "y1": str(_MT),
+            "x2": f"{x:.1f}", "y2": str(_MT + _PH),
+            "stroke": _C_GRID, "stroke-width": "1"})
+    for qt in q_ticks:
+        _, y = to_px(p_range[0], qt)
+        ET.SubElement(root, "line", {"x1": str(_ML), "y1": f"{y:.1f}",
+            "x2": str(_ML + _PW), "y2": f"{y:.1f}",
+            "stroke": _C_GRID, "stroke-width": "1"})
+
+    # zero-value reference lines
+    if p_range[0] < 0 < p_range[1]:
+        x0, _ = to_px(0.0, q_range[0])
+        ET.SubElement(root, "line", {"x1": f"{x0:.1f}", "y1": str(_MT),
+            "x2": f"{x0:.1f}", "y2": str(_MT + _PH),
+            "stroke": _C_ZERO, "stroke-width": "1", "stroke-dasharray": "4,3"})
+    if q_range[0] < 0 < q_range[1]:
+        _, y0 = to_px(p_range[0], 0.0)
+        ET.SubElement(root, "line", {"x1": str(_ML), "y1": f"{y0:.1f}",
+            "x2": str(_ML + _PW), "y2": f"{y0:.1f}",
+            "stroke": _C_ZERO, "stroke-width": "1", "stroke-dasharray": "4,3"})
+
+    # ---- closed envelopes (back-to-front so later curves render on top)
+    for curve in curves:
+        opacity = str(curve.get("fill_opacity", 0.45))
+        pts_max = [to_px(p, q) for p, q in zip(curve["p_pts"], curve["qmax_pts"])]
+        pts_min = [to_px(p, q) for p, q in zip(
+            reversed(curve["p_pts"]), reversed(curve["qmin_pts"])
+        )]
+        all_pts = pts_max + pts_min
+        d = (f"M {all_pts[0][0]:.2f},{all_pts[0][1]:.2f} "
+             + " ".join(f"L {x:.2f},{y:.2f}" for x, y in all_pts[1:])
+             + " Z")
+        ET.SubElement(root, "path", {
+            "d": d,
+            "fill": curve["fill_color"], "fill-opacity": opacity,
+            "stroke": curve["stroke_color"], "stroke-width": "2",
+            "stroke-linejoin": "round",
+        })
+
+    # ---- plot area border
+    ET.SubElement(root, "rect", {
+        "x": str(_ML), "y": str(_MT), "width": str(_PW), "height": str(_PH),
+        "fill": "none", "stroke": _C_AXIS, "stroke-width": "1",
+    })
+
+    # ---- X-axis ticks and labels
+    y_bot = _MT + _PH
+    for pt in p_ticks:
+        if p_range[0] <= pt <= p_range[1]:
+            x, _ = to_px(pt, q_range[0])
+            ET.SubElement(root, "line", {
+                "x1": f"{x:.1f}", "y1": str(y_bot),
+                "x2": f"{x:.1f}", "y2": str(y_bot + 5),
+                "stroke": _C_AXIS, "stroke-width": "1.5",
+            })
+            t = ET.SubElement(root, "text", {
+                "x": f"{x:.1f}", "y": str(y_bot + 18),
+                "text-anchor": "middle",
+                "font-family": "sans-serif", "font-size": "12", "fill": _C_TEXT,
+            })
+            t.text = _fmt(pt)
+
+    # ---- Y-axis ticks and labels
+    for qt in q_ticks:
+        if q_range[0] <= qt <= q_range[1]:
+            _, y = to_px(p_range[0], qt)
+            ET.SubElement(root, "line", {
+                "x1": str(_ML - 5), "y1": f"{y:.1f}",
+                "x2": str(_ML),     "y2": f"{y:.1f}",
+                "stroke": _C_AXIS, "stroke-width": "1.5",
+            })
+            t = ET.SubElement(root, "text", {
+                "x": str(_ML - 8), "y": f"{y + 4:.1f}",
+                "text-anchor": "end",
+                "font-family": "sans-serif", "font-size": "12", "fill": _C_TEXT,
+            })
+            t.text = _fmt(qt)
+
+    # ---- axis labels
+    t = ET.SubElement(root, "text", {
+        "x": str(_ML + _PW // 2), "y": str(_H - 12),
+        "text-anchor": "middle",
+        "font-family": "sans-serif", "font-size": "13", "fill": _C_TEXT,
+    })
+    t.text = "Active power P (MW)"
+
+    cy = _MT + _PH // 2
+    t = ET.SubElement(root, "text", {
+        "transform": f"translate(16,{cy}) rotate(-90)",
+        "text-anchor": "middle",
+        "font-family": "sans-serif", "font-size": "13", "fill": _C_TEXT,
+    })
+    t.text = "Reactive power Q (MVar)"
+
+    # ---- title / subtitle
+    if title:
+        t = ET.SubElement(root, "text", {
+            "x": str(_W // 2), "y": "24",
+            "text-anchor": "middle",
+            "font-family": "sans-serif", "font-size": "15", "font-weight": "bold",
+            "fill": _C_TEXT,
+        })
+        t.text = title
+    if subtitle:
+        t = ET.SubElement(root, "text", {
+            "x": str(_W // 2), "y": "44",
+            "text-anchor": "middle",
+            "font-family": "sans-serif", "font-size": "11", "fill": "#666666",
+        })
+        t.text = subtitle
+
+    # ---- legend (top-right inside plot area)
+    if curves:
+        n = len(curves)
+        entry_h   = 22
+        swatch_w  = 18
+        swatch_h  = 11
+        pad       = 8
+        max_chars = max(len(c["label"]) for c in curves)
+        box_w = pad + swatch_w + 6 + int(max_chars * 7.2) + pad
+        box_h = n * entry_h + 6
+        bx    = _ML + _PW - box_w - 6
+        by    = _MT + 8
+
+        ET.SubElement(root, "rect", {
+            "x": str(bx), "y": str(by),
+            "width": str(box_w), "height": str(box_h),
+            "fill": "#ffffff", "fill-opacity": "0.88",
+            "stroke": "#cccccc", "stroke-width": "1", "rx": "4",
+        })
+        for i, curve in enumerate(curves):
+            ey = by + 6 + i * entry_h
+            ex = bx + pad
+            ET.SubElement(root, "rect", {
+                "x": str(ex), "y": str(ey),
+                "width": str(swatch_w), "height": str(swatch_h),
+                "fill": curve["fill_color"],
+                "fill-opacity": str(curve.get("fill_opacity", 0.65)),
+                "stroke": curve["stroke_color"], "stroke-width": "1.5", "rx": "2",
+            })
+            t = ET.SubElement(root, "text", {
+                "x": str(ex + swatch_w + 6),
+                "y": str(ey + swatch_h - 1),
+                "font-family": "sans-serif", "font-size": "11", "fill": _C_TEXT,
+            })
+            t.text = curve["label"]
+
+    return ET.ElementTree(root)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
