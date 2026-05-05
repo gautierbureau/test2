@@ -73,12 +73,12 @@ class TransformerGroup:
 
 def discover_lv_generators(
     network: pn.Network,
-    hv_nominal_v: float,
-    tolerance: float = 1.0,
+    hv_v_min: float,
+    hv_v_max: float,
 ) -> list[TransformerGroup]:
     """Return one TransformerGroup per transformer whose HV side nominal
-    voltage is within *tolerance* kV of *hv_nominal_v* and that has at
-    least one generator on its LV bus.
+    voltage falls in [*hv_v_min*, *hv_v_max*] kV and that has at least
+    one generator on its LV bus.
 
     Loads on the LV bus are paired with generators (sorted alphabetically)
     when their counts match; otherwise ``aux_load_id`` is set to ``None``
@@ -96,9 +96,9 @@ def discover_lv_generators(
         nom1 = float(vl_df.loc[tx["voltage_level1_id"], "nominal_v"])
         nom2 = float(vl_df.loc[tx["voltage_level2_id"], "nominal_v"])
 
-        if abs(nom1 - hv_nominal_v) <= tolerance:
+        if hv_v_min <= nom1 <= hv_v_max:
             hv_vl_id, lv_vl_id = tx["voltage_level1_id"], tx["voltage_level2_id"]
-        elif abs(nom2 - hv_nominal_v) <= tolerance:
+        elif hv_v_min <= nom2 <= hv_v_max:
             hv_vl_id, lv_vl_id = tx["voltage_level2_id"], tx["voltage_level1_id"]
         else:
             continue
@@ -227,8 +227,12 @@ def main() -> None:
         help="Input network file (XIIDM or any pypowsybl-supported format).",
     )
     parser.add_argument(
-        "--hv-voltage", required=True, type=float, metavar="KV",
-        help="Target HV nominal voltage in kV (e.g. 400).",
+        "--hv-voltage", required=True, type=float, nargs="+", metavar="KV",
+        help=(
+            "HV nominal voltage in kV. "
+            "One value: exact match with ±1 kV tolerance (e.g. --hv-voltage 400). "
+            "Two values: explicit range (e.g. --hv-voltage 380 420)."
+        ),
     )
     parser.add_argument(
         "--output-network", metavar="PATH",
@@ -258,24 +262,28 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     loss_alloc = LossAllocation(args.loss_allocation)
 
+    raw_v = args.hv_voltage
+    if len(raw_v) == 1:
+        hv_v_min, hv_v_max = raw_v[0] - 1.0, raw_v[0] + 1.0
+        hv_label = f"{raw_v[0]} kV"
+    elif len(raw_v) == 2:
+        hv_v_min, hv_v_max = sorted(raw_v)
+        hv_label = f"{hv_v_min}–{hv_v_max} kV"
+    else:
+        parser.error("--hv-voltage accepts 1 value (exact) or 2 values (range)")
+
     # ---- Load network
     original_network = pn.load(str(net_path))
     print(f"Loaded  : {net_path}")
 
     # ---- Discover LV generator groups
-    groups = discover_lv_generators(original_network, args.hv_voltage)
+    groups = discover_lv_generators(original_network, hv_v_min, hv_v_max)
     if not groups:
-        print(
-            f"No generators found behind transformers at "
-            f"{args.hv_voltage} kV nominal voltage."
-        )
+        print(f"No generators found behind transformers at {hv_label} nominal voltage.")
         return
 
     total = sum(len(g.specs) for g in groups)
-    print(
-        f"Found   : {total} generator(s) in {len(groups)} "
-        f"transformer group(s) at {args.hv_voltage} kV"
-    )
+    print(f"Found   : {total} generator(s) in {len(groups)} transformer group(s) at {hv_label}")
     for grp in groups:
         print(
             f"  TX={grp.transformer_id}  LV={grp.lv_vl_id}  "
