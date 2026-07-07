@@ -97,7 +97,9 @@ curve-transporter/
     ├── Main.java                       picocli CLI entry point
     ├── BusToNodeBreakerConverter.java  bus-breaker → node-breaker converter
     ├── ExtendedIeee14Factory.java      IEEE-14 grown with extra equipment types
-    └── ConvertToNodeBreaker.java       picocli CLI for the converter
+    ├── ConvertToNodeBreaker.java       picocli CLI for the converter
+    ├── CurrentLimitsGenerator.java     load-flow-based current limit sets
+    └── AddCurrentLimits.java           picocli CLI for the limit generator
 ```
 
 ## Bus-breaker → node-breaker conversion
@@ -176,6 +178,57 @@ The three-winding transformer is the one type powsybl has no ready-made feeder
 bay for, so the converter builds each of its three bays by hand (a disconnector
 to the busbar plus a series breaker per leg); every other type goes through
 `CreateFeederBay` / `CreateBranchFeederBays`.
+
+## Load-flow-based current limit sets
+
+`CurrentLimitsGenerator.apply(network, config)` fills in the operational
+**current limits** that many cases ship without — the PEGASE snapshots are the
+usual example (`case13659pegase` has none at all). It runs an AC load flow,
+reads the current that actually flows through each branch side, and sizes a
+complete operational-limit group (a "current limits set") around it: one
+permanent limit (PATL) plus a configurable ladder of temporary limits (TATL),
+each with its own acceptable duration ("temporisation").
+
+Sizing is **per side**, because the amperage on the two ends of a transformer
+differs by the voltage ratio — a current limit is only meaningful next to the
+current it bounds. For a side carrying `I` amps:
+
+```
+permanent          value = I * permanentMargin        duration = -1 (∞)
+temporary tier k   value = permanent * tierMargin_k    duration = tierSeconds_k
+```
+
+With the defaults (`permanentMargin=1.25`, tiers `1200s:1.10, 600s:1.20,
+60s:1.40`) a branch loaded to `I` in the base case sits at exactly 80 %
+(`1 / 1.25`) of its permanent limit. The set is stored as a named
+operational-limit group and selected as the branch's active group; existing
+groups are left untouched (`--only-missing` skips branches that already carry
+limits). Lines, two- and three-winding transformers and boundary (dangling)
+lines are handled; sides with no usable flow (disconnected / near-zero current)
+are skipped. This mirrors the Python `add_current_limits.py` module bit for bit
+— the two produce identical side counts on every case below.
+
+```bash
+java -cp target/curve-transporter-1.0.0-shaded.jar \
+     com.example.transporter.AddCurrentLimits --ieee14 --validate
+# --ieee14-extended : IEEE-14 + 3-winding transformer, boundary lines, …
+# -i case13659pegase.xiidm -o out.xiidm --validate
+# --permanent-margin 1.3 --tiers 1200:1.10,600:1.20,60:1.40 --group-name LOADFLOW_BASED
+```
+
+`--validate` runs the load flow and reports each side's base-case loading
+against its new permanent limit (peaks at `1/permanentMargin`, no overloads).
+Exercised on IEEE-14/300 and on the PEGASE cases:
+
+| network         | branch sides sized | skipped (no flow) | max base loading |
+|-----------------|--------------------|-------------------|------------------|
+| case1354pegase  | 3 968              | 14                | 80.0 %           |
+| case9241pegase  | 31 632             | 466               | 80.0 % *         |
+| case13659pegase | 39 798             | 1 136             | 80.0 %           |
+
+`*` case9241pegase needs the DC-start fallback to converge, applied
+automatically. `case13659pegase` carries no operational limits at all, so the
+tool builds the full set from scratch.
 
 ## Dependencies
 
