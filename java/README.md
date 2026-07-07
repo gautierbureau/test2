@@ -139,16 +139,22 @@ java -cp target/curve-transporter-1.0.0-shaded.jar \
 
 ### Busbar layout options
 
-By default each bus becomes a single busbar section — except that on a bus
-hosting **more than one generator**, each generator is given its own busbar
-section (the usual layout for a multi-unit power station, where every unit must
-be independently switchable). The sections of a bus are chained by *closed*
-coupler breakers, so they stay one electrical node until a coupler is opened.
+By default a bus hosting **generators** is given one busbar section **per
+generator** (the usual layout for a multi-unit power station, where every unit
+must be independently switchable); a bus without generators becomes a single
+section. The sections of a bus are chained by *closed* coupler breakers, so they
+stay one electrical node until a coupler is opened.
 
-- `--busbars-per-bus N` — give every bus at least `N` busbar sections (a
-  sectionalized single busbar). Feeders are spread round-robin across them.
-- `--no-generator-busbars` — disable the one-busbar-per-generator policy, so a
-  multi-unit bus collapses to `N` sections like any other.
+The two counts are **decoupled**:
+
+- `--busbars-per-bus N` — how many busbar sections buses **without** generators
+  get (a sectionalized single busbar). Feeders are spread round-robin. Generator
+  buses are unaffected — they always get one section per generator.
+- `--no-generator-busbars` — disable the one-busbar-per-generator policy, so
+  every bus (generator or not) gets `N` sections uniformly.
+
+So a bus with `k` generators gets exactly `k` sections regardless of
+`--busbars-per-bus`.
 
 The same is available programmatically:
 `BusToNodeBreakerConverter.convert(network, busbarSectionsPerBus, oneBusbarPerGenerator)`.
@@ -232,11 +238,11 @@ Exercised on IEEE-14/300 and on the PEGASE cases:
 automatically. `case13659pegase` carries no operational limits at all, so the
 tool builds the full set from scratch.
 
-## Completing missing reactive limits and tap changers
+## Completing missing network data
 
-`NetworkCompleter` (CLI `complete-network`) fills two other things a case is
-often missing, sized from a load flow — the Java port of Python's
-`complete_network.py`:
+`NetworkCompleter` (CLI `complete-network`) fills several things a case is often
+missing, sized from a load flow — the Java port of Python's
+`complete_network.py`. With no completion flag, all of them run:
 
 - **`addReactiveLimits`** gives a generator a finite MIN_MAX band when it has
   none or a placeholder "infinite" one (`|Q| >= 1e4`, the MATPOWER/PEGASE
@@ -251,21 +257,29 @@ often missing, sized from a load flow — the Java port of Python's
   only acts once tap control is on, with its setpoint already at the current
   voltage.
 
+- **`setGeneratorEnergySource`** assigns an energy source (default `THERMAL`) to
+  generators whose source is `OTHER`. A load flow can't infer fuel type, so this
+  is a documented blanket default, not inference.
+- **`addActivePowerControl`** sets the `ActivePowerControl` extension (participate,
+  participation factor proportional to `maxP`, configurable droop) so distributed
+  slack / redispatch has something to act on.
+
 Phase tap changers are deliberately not synthesized (a phase shifter is a
-physical device; cases that use them already carry them). With no flag, both
-completions run.
+physical device; cases that use them already carry them).
 
 ```bash
 java -cp target/curve-transporter-1.0.0-shaded.jar \
-     com.example.transporter.CompleteNetwork --ieee14
-# -i case13659pegase.xiidm -o out.xiidm            (both completions)
+     com.example.transporter.CompleteNetwork --ieee14          # all completions
+# -i case13659pegase.xiidm -o out.xiidm
 # --reactive-limits                                (only reactive limits)
 # --ratio-tap-changers --rtc-steps 8 --rtc-step 0.0125
+# --energy-source --active-power-control
 ```
 
-On `case13659pegase` this fills the 7 placeholder reactive bands and adds a
-ratio tap changer to the 5 655 transformers lacking one (the 74 phase-shifters
-are left alone) — matching the Python module's counts.
+On `case13659pegase` this fills the 7 placeholder reactive bands, adds a ratio
+tap changer to the 5 655 transformers lacking one (the 74 phase-shifters are
+left alone), sets 4 092 energy sources and 4 092 participation factors —
+matching the Python module's counts.
 
 ## Dependencies
 

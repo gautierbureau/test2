@@ -2,11 +2,13 @@ package com.example.transporter;
 
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Bus;
+import com.powsybl.iidm.network.EnergySource;
 import com.powsybl.iidm.network.Generator;
 import com.powsybl.iidm.network.MinMaxReactiveLimits;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.RatioTapChanger;
 import com.powsybl.iidm.network.TwoWindingsTransformer;
+import com.powsybl.iidm.network.extensions.ActivePowerControl;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
@@ -179,11 +181,62 @@ class NetworkCompleterTest {
     }
 
     @Test
+    void energySourceSetOnUndefinedOnly() {
+        Network net = IeeeCdfNetworkFactory.create14();  // all generators OTHER
+        NetworkCompleter.EnergySourceStats stats = NetworkCompleter.setGeneratorEnergySource(
+                net, EnergySource.THERMAL, true);
+        assertEquals(5, stats.set());
+        for (Generator g : net.getGenerators()) {
+            assertEquals(EnergySource.THERMAL, g.getEnergySource());
+        }
+
+        // A generator with a real source is left alone.
+        net.getGenerator("B2-G").setEnergySource(EnergySource.HYDRO);
+        NetworkCompleter.EnergySourceStats again = NetworkCompleter.setGeneratorEnergySource(
+                net, EnergySource.THERMAL, true);
+        assertEquals(0, again.set());
+        assertEquals(5, again.skippedDefined());
+        assertEquals(EnergySource.HYDRO, net.getGenerator("B2-G").getEnergySource());
+    }
+
+    @Test
+    void activePowerControlAddedWithParticipation() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        NetworkCompleter.ActivePowerControlStats stats =
+                NetworkCompleter.addActivePowerControl(net, 5.0, true);
+        assertEquals(5, stats.added());
+
+        for (Generator g : net.getGenerators()) {
+            ActivePowerControl<Generator> apc = g.getExtension(ActivePowerControl.class);
+            assertNotNull(apc);
+            assertTrue(apc.isParticipate());
+            assertEquals(5.0, apc.getDroop(), 1e-9);
+            double expected = g.getMaxP() > 0 ? g.getMaxP() : 1.0;
+            assertEquals(expected, apc.getParticipationFactor(), 1e-6);
+        }
+
+        // Idempotent.
+        NetworkCompleter.ActivePowerControlStats again =
+                NetworkCompleter.addActivePowerControl(net, 4.0, true);
+        assertEquals(0, again.added());
+        assertEquals(5, again.skippedExisting());
+    }
+
+    @Test
+    void activePowerControlRejectsBadDroop() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        assertThrows(IllegalArgumentException.class,
+                () -> NetworkCompleter.addActivePowerControl(net, 0.0, true));
+    }
+
+    @Test
     void bothCompletionsRoundtrip(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
             throws Exception {
         Network net = ExtendedIeee14Factory.create();
         NetworkCompleter.addReactiveLimits(net, NetworkCompleter.ReactiveConfig.defaults());
         NetworkCompleter.addRatioTapChangers(net, NetworkCompleter.RatioTapConfig.defaults());
+        NetworkCompleter.setGeneratorEnergySource(net, EnergySource.THERMAL, true);
+        NetworkCompleter.addActivePowerControl(net, 4.0, true);
         long rtcCount = countRatioTapChangers(net);
         assertTrue(rtcCount > 0);
 
@@ -191,6 +244,10 @@ class NetworkCompleterTest {
         NetworkSerDeWrite(net, out);
         Network reloaded = Network.read(out);
         assertEquals(rtcCount, countRatioTapChangers(reloaded));
+        // Energy source and active power control survive the round trip.
+        assertEquals(EnergySource.THERMAL, reloaded.getGenerators().iterator().next().getEnergySource());
+        assertNotNull(reloaded.getGenerators().iterator().next()
+                .getExtension(ActivePowerControl.class));
         assertTrue(LoadFlow.run(reloaded).isFullyConverged());
     }
 

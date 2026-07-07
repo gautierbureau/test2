@@ -11,12 +11,17 @@ topological, so an AC load flow on the result matches the original bus-for-bus.
 Options
 -------
 ``busbar_sections_per_bus``
-    Split every bus into this many busbar sections, chained by closed coupling
-    devices (a sectionalized single busbar). Feeders are spread round-robin.
+    Split every bus *without generators* into this many busbar sections, chained
+    by closed coupling devices (a sectionalized single busbar). Feeders are
+    spread round-robin. Buses that host generators are governed by
+    ``one_busbar_per_generator`` instead (the two counts are decoupled).
 ``one_busbar_per_generator``
-    When set (the default), a bus hosting several generators gets at least one
-    busbar section per generator, and each generator is placed on its own
-    section - the usual layout for a multi-unit power station.
+    When set (the default), a bus hosting generators gets exactly one busbar
+    section per generator - the usual layout for a multi-unit power station -
+    regardless of ``busbar_sections_per_bus``. Each generator is placed on its
+    own section (non-generator feeders on the same bus still round-robin across
+    those sections). When unset, generator buses follow
+    ``busbar_sections_per_bus`` like any other.
 
 Supported equipment: generators, loads, batteries, static var compensators,
 dangling (boundary) lines, VSC and LCC converter stations (all reconnected as
@@ -54,12 +59,12 @@ class _BusbarAssignment:
         self._gen_cursor: Dict[str, int] = defaultdict(int)
 
     def section_count_for(self, bus_id: str) -> int:
-        wanted = self._min_sections
-        if self._one_per_gen:
-            gens = self._gens_per_bus.get(bus_id, 0)
-            if gens > 1:
-                wanted = max(wanted, gens)
-        return max(1, wanted)
+        # A bus hosting generators gets exactly one busbar section per generator;
+        # busbar_sections_per_bus applies only to buses without generators (the
+        # two counts are decoupled).
+        if self._one_per_gen and self._gens_per_bus.get(bus_id, 0) >= 1:
+            return max(1, self._gens_per_bus[bus_id])
+        return max(1, self._min_sections)
 
     def register(self, bus_id: str, bbs_id: str, node: int) -> None:
         self._sections.setdefault(bus_id, []).append(bbs_id)

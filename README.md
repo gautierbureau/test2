@@ -47,10 +47,17 @@ helpers. It supports the same equipment as the Java version — generators,
 loads, batteries, static var compensators, boundary lines, VSC/LCC converter
 stations, lines, two- and three-winding transformers (with ratio/phase tap
 changers), HVDC lines, tie lines, linear/non-linear shunts and bus couplers
-(only grounds are unhandled) — plus the `--busbars-per-bus` and
-one-busbar-per-generator options. Validated bus-for-bus on IEEE-14/118/300, on
+(only grounds are unhandled). Validated bus-for-bus on IEEE-14/118/300, on
 an extended IEEE-14 exercising every added type, and on PEGASE 1354/2869/9241
 (the last needs a DC-start fallback, applied automatically by `validate()`).
+
+The two busbar-layout counts are **decoupled**: `one_busbar_per_generator`
+(default) puts each generator on its own busbar section on the buses that host
+generators, while `busbar_sections_per_bus` sets how many sections the buses
+*without* generators get (a sectionalized single busbar). A bus with `k`
+generators therefore gets exactly `k` sections regardless of
+`busbars_per_bus`. Turn the policy off to give every bus `busbars_per_bus`
+sections uniformly.
 
 ```
 cd python
@@ -150,10 +157,11 @@ peaks at 80 % of the permanent limit with no overloads throughout:
 the full set from scratch; `case9241pegase` needs the automatic DC-start
 fallback to converge.
 
-## Completing missing reactive limits and tap changers
+## Completing missing network data
 
 `python/complete_network.py` (and the Java `NetworkCompleter` / `complete-network`
-CLI) fill two other things a case is often missing, again sized from a load flow:
+CLI) fill several things a case is often missing, sized from a load flow. With
+no completion flag on the CLI, all of them run:
 
 - **Generator reactive limits** — `add_reactive_limits` gives a generator a
   finite MIN_MAX band when it has none or carries a placeholder "infinite" one
@@ -169,18 +177,29 @@ CLI) fill two other things a case is often missing, again sized from a load flow
   case is unchanged (max ΔV ≈ 0); the regulator only acts once tap control is
   switched on, and its setpoint already equals the current voltage.
 
+- **Generator energy source** — `set_generator_energy_source` assigns an energy
+  source (default `THERMAL`) to generators whose source is `OTHER` (the IIDM
+  "unset" value). A load flow can't infer fuel type, so this is a documented
+  blanket default, not inference.
+- **Active power control** — `add_active_power_control` sets the
+  `activePowerControl` extension (participate = true, participation factor
+  proportional to `maxP`, configurable droop) so distributed slack / redispatch
+  has something to act on.
+
 Phase tap changers are deliberately **not** synthesized — a phase shifter is a
 specific physical device, and cases that use them already carry them (PEGASE 13k
 has 74). On `case13659pegase` this fills the 7 placeholder-infinite reactive
-bands and adds a ratio tap changer to the 5 655 transformers that lack one
-(leaving the 74 phase-shifters alone). Python and Java produce identical counts.
+bands, adds a ratio tap changer to the 5 655 transformers that lack one (leaving
+the 74 phase-shifters alone), sets 4 092 energy sources and 4 092 participation
+factors. Python and Java produce identical counts.
 
 ```
 cd python
-python3 complete_network.py --builtin ieee14
+python3 complete_network.py --builtin ieee14                   # all completions
 python3 complete_network.py -i case13659pegase.mat -o out.xiidm
 python3 complete_network.py -i case.xiidm --reactive-limits    # only one completion
 python3 complete_network.py -i case.xiidm --ratio-tap-changers --rtc-steps 8 --rtc-step 0.0125
+python3 complete_network.py -i case.xiidm --energy-source --active-power-control
 ```
 
 ## Method (per-unit, on HV side)

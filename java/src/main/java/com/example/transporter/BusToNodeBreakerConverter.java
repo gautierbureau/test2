@@ -91,14 +91,13 @@ public final class BusToNodeBreakerConverter {
 
         /** Number of busbar sections to create for a given bus. */
         int sectionCountFor(String busId) {
-            int wanted = minSectionsPerBus;
-            if (oneBusbarPerGenerator) {
-                int gens = gensPerBus.getOrDefault(busId, 0);
-                if (gens > 1) {
-                    wanted = Math.max(wanted, gens);
-                }
+            // A bus hosting generators gets exactly one busbar section per
+            // generator; minSectionsPerBus applies only to buses without
+            // generators (the two counts are decoupled).
+            if (oneBusbarPerGenerator && gensPerBus.getOrDefault(busId, 0) >= 1) {
+                return Math.max(1, gensPerBus.get(busId));
             }
-            return Math.max(1, wanted);
+            return Math.max(1, minSectionsPerBus);
         }
 
         void register(String busId, String bbsId) {
@@ -153,8 +152,7 @@ public final class BusToNodeBreakerConverter {
 
     /**
      * Convert with {@code busbarSectionsPerBus} busbar sections per bus, keeping
-     * the default policy of giving each generator its own busbar section on
-     * buses that host more than one.
+     * the default policy of giving each generator its own busbar section.
      */
     public static Network convert(Network source, int busbarSectionsPerBus) {
         return convert(source, busbarSectionsPerBus, true);
@@ -164,13 +162,13 @@ public final class BusToNodeBreakerConverter {
      * Build and return the node-breaker equivalent of {@code source}, splitting
      * each configured bus into busbar sections.
      *
-     * <p>Each bus is given at least {@code busbarSectionsPerBus} busbar sections.
-     * When {@code oneBusbarPerGenerator} is set and a bus hosts several
-     * generators, the section count is raised to at least the number of
-     * generators so each generator can sit on its own busbar - the usual
-     * practice for a multi-unit power station, where each unit must be
-     * independently switchable. The remaining feeders are spread round-robin
-     * across the sections.
+     * <p>When {@code oneBusbarPerGenerator} is set, a bus that hosts generators
+     * gets exactly one busbar section per generator - the usual practice for a
+     * multi-unit power station, where each unit must be independently switchable
+     * - regardless of {@code busbarSectionsPerBus}. Buses without generators get
+     * {@code busbarSectionsPerBus} sections. The two counts are decoupled. When
+     * the policy is off, every bus gets {@code busbarSectionsPerBus} sections.
+     * Feeders are spread round-robin across a bus's sections.
      *
      * <p>Sections of the same bus are chained by <b>closed coupler breakers</b>
      * (BBS_1 —[brk]— BBS_2 —[brk]— …), so they form one electrical node and the
@@ -178,10 +176,10 @@ public final class BusToNodeBreakerConverter {
      * exactly as it would in the field.
      *
      * @param source                a fully bus-breaker network
-     * @param busbarSectionsPerBus  minimum number of busbar sections per bus
+     * @param busbarSectionsPerBus  busbar sections for buses without generators
      *                              ({@code >= 1})
-     * @param oneBusbarPerGenerator when {@code true}, buses with more than one
-     *                              generator get one busbar section per generator
+     * @param oneBusbarPerGenerator when {@code true}, a generator bus gets one
+     *                              busbar section per generator instead
      * @return a new, electrically identical, all node-breaker network
      * @throws IllegalArgumentException if {@code busbarSectionsPerBus < 1}
      */

@@ -61,7 +61,9 @@ def test_conversion_is_electrically_transparent(factory):
 @pytest.mark.parametrize("n", [2, 3])
 def test_sectionalized_busbars(n):
     source = pn.create_ieee14()
-    target = convert(source, busbar_sections_per_bus=n)
+    # With one_busbar_per_generator off, busbar_sections_per_bus applies to every
+    # bus, so a sectionalized single busbar has exactly n sections per bus.
+    target = convert(source, busbar_sections_per_bus=n, one_busbar_per_generator=False)
 
     buses = _n_buses(source)
     assert len(target.get_busbar_sections()) == buses * n
@@ -89,6 +91,20 @@ def test_one_busbar_per_generator():
     assert len(flat.get_busbar_sections()) == 2
 
     assert validate(net, target)["max_dv_kv"] < 1e-2
+
+
+def test_generator_and_feeder_section_counts_are_decoupled():
+    # busbar_sections_per_bus controls only non-generator buses; a generator bus
+    # gets one section per generator no matter how large that count is.
+    net = _multi_unit_network()  # B1: 3 generators, B2: load only
+    target = convert(net, busbar_sections_per_bus=5, one_busbar_per_generator=True)
+
+    def sections_of(vl):
+        return len(target.get_busbar_sections(all_attributes=True).query(
+            "voltage_level_id == @vl"))
+
+    assert sections_of("VL1") == 3   # one per generator, not 5
+    assert sections_of("VL2") == 5   # non-generator bus honours busbars-per-bus
 
 
 def _extended_ieee14():

@@ -1,6 +1,7 @@
 package com.example.transporter;
 
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
+import com.powsybl.iidm.network.EnergySource;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.serde.ExportOptions;
 import com.powsybl.iidm.serde.NetworkSerDe;
@@ -52,6 +53,14 @@ public class CompleteNetwork implements Callable<Integer> {
             description = "Add regulating ratio tap changers where missing.")
     private boolean ratioTapChangers;
 
+    @Option(names = {"--energy-source"},
+            description = "Set energy source on generators that have none.")
+    private boolean energySource;
+
+    @Option(names = {"--active-power-control"},
+            description = "Add participation factors for distributed slack.")
+    private boolean activePowerControl;
+
     @Option(names = {"--power-factor"}, paramLabel = "PF",
             defaultValue = "" + NetworkCompleter.DEFAULT_POWER_FACTOR,
             description = "Reactive sizing fallback power factor (default: ${DEFAULT-VALUE}).")
@@ -67,6 +76,15 @@ public class CompleteNetwork implements Callable<Integer> {
             description = "Ratio tap changer step increment (default: ${DEFAULT-VALUE}).")
     private double rtcStep;
 
+    @Option(names = {"--energy-source-value"}, paramLabel = "SRC", defaultValue = "THERMAL",
+            description = "Energy source to assign (default: ${DEFAULT-VALUE}).")
+    private EnergySource energySourceValue;
+
+    @Option(names = {"--droop"}, paramLabel = "PCT",
+            defaultValue = "" + NetworkCompleter.DEFAULT_DROOP,
+            description = "Active power control droop percent (default: ${DEFAULT-VALUE}).")
+    private double droop;
+
     @Override
     public Integer call() {
         try {
@@ -78,11 +96,15 @@ public class CompleteNetwork implements Callable<Integer> {
                     network.getId(), network.getGeneratorCount(),
                     network.getTwoWindingsTransformerCount());
 
-            // With no explicit selection, run both completions.
-            boolean doReactive = reactiveLimits || !ratioTapChangers;
-            boolean doTaps = ratioTapChangers || !reactiveLimits;
+            // With no explicit selection, run every completion.
+            boolean selected = reactiveLimits || ratioTapChangers
+                    || energySource || activePowerControl;
+            boolean doReactive = reactiveLimits || !selected;
+            boolean doTaps = ratioTapChangers || !selected;
+            boolean doEnergy = energySource || !selected;
+            boolean doApc = activePowerControl || !selected;
 
-            // One load flow shared by both completions.
+            // One load flow shared by all completions.
             NetworkCompleter.runAcOrThrow(network);
 
             if (doReactive) {
@@ -101,6 +123,20 @@ public class CompleteNetwork implements Callable<Integer> {
                 System.out.printf("Ratio tap changers: added %d of %d transformer(s) "
                                 + "(%d already had a tap changer, %d without a base-case voltage).%n",
                         t.added(), t.transformers(), t.skippedExisting(), t.skippedNoVoltage());
+            }
+            if (doEnergy) {
+                NetworkCompleter.EnergySourceStats e = NetworkCompleter.setGeneratorEnergySource(
+                        network, energySourceValue, true);
+                System.out.printf("Energy source: set %d of %d generator(s) to %s "
+                                + "(%d already defined).%n",
+                        e.set(), e.generators(), energySourceValue, e.skippedDefined());
+            }
+            if (doApc) {
+                NetworkCompleter.ActivePowerControlStats a =
+                        NetworkCompleter.addActivePowerControl(network, droop, true);
+                System.out.printf("Active power control: added %d of %d generator(s) "
+                                + "(%d already had it).%n",
+                        a.added(), a.generators(), a.skippedExisting());
             }
 
             if (output != null) {

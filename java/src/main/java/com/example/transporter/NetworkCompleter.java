@@ -1,6 +1,7 @@
 package com.example.transporter;
 
 import com.powsybl.iidm.network.Bus;
+import com.powsybl.iidm.network.EnergySource;
 import com.powsybl.iidm.network.Generator;
 import com.powsybl.iidm.network.MinMaxReactiveLimits;
 import com.powsybl.iidm.network.Network;
@@ -9,6 +10,8 @@ import com.powsybl.iidm.network.RatioTapChangerAdder;
 import com.powsybl.iidm.network.ReactiveLimits;
 import com.powsybl.iidm.network.ReactiveLimitsKind;
 import com.powsybl.iidm.network.TwoWindingsTransformer;
+import com.powsybl.iidm.network.extensions.ActivePowerControl;
+import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
@@ -42,6 +45,8 @@ public final class NetworkCompleter {
     public static final double DEFAULT_PLACEHOLDER_THRESHOLD = 1e4;
     public static final int DEFAULT_RTC_STEPS_PER_SIDE = 8;
     public static final double DEFAULT_RTC_STEP_INCREMENT = 0.0125;
+    public static final EnergySource DEFAULT_ENERGY_SOURCE = EnergySource.THERMAL;
+    public static final double DEFAULT_DROOP = 4.0;
 
     private NetworkCompleter() {
     }
@@ -233,6 +238,86 @@ public final class NetworkCompleter {
     private static double side2Voltage(TwoWindingsTransformer tx) {
         Bus bus = tx.getTerminal2().getBusView().getBus();
         return bus == null ? Double.NaN : bus.getV();
+    }
+
+    // -----------------------------------------------------------------------
+    // Generator energy source
+    // -----------------------------------------------------------------------
+
+    public record EnergySourceStats(int generators, int set, int skippedDefined) {
+    }
+
+    /**
+     * Assign an energy source to generators that carry none. A load flow cannot
+     * infer fuel type, so this is a blanket default: generators whose source is
+     * {@link EnergySource#OTHER} (the IIDM "unset" value) are set to
+     * {@code source}. With {@code onlyUndefined = false} every generator is set.
+     */
+    public static EnergySourceStats setGeneratorEnergySource(Network network,
+                                                             EnergySource source,
+                                                             boolean onlyUndefined) {
+        int generators = 0;
+        int set = 0;
+        int skippedDefined = 0;
+        for (Generator g : network.getGenerators()) {
+            generators++;
+            if (onlyUndefined && g.getEnergySource() != EnergySource.OTHER) {
+                skippedDefined++;
+                continue;
+            }
+            g.setEnergySource(source);
+            set++;
+        }
+        return new EnergySourceStats(generators, set, skippedDefined);
+    }
+
+    // -----------------------------------------------------------------------
+    // Active power control (participation factors)
+    // -----------------------------------------------------------------------
+
+    public record ActivePowerControlStats(int generators, int added, int skippedExisting) {
+    }
+
+    /**
+     * Give generators an active-power-control participation factor. Sets the
+     * {@code ActivePowerControl} extension with participation enabled and a
+     * factor proportional to the generator's active-power capability
+     * ({@code maxP}, falling back to {@code targetP} then 1), so distributed
+     * slack / redispatch has something to act on. Generators that already carry
+     * the extension are left untouched when {@code onlyMissing}.
+     */
+    public static ActivePowerControlStats addActivePowerControl(Network network,
+                                                                double droop,
+                                                                boolean onlyMissing) {
+        if (!(droop > 0)) {
+            throw new IllegalArgumentException("droop must be positive");
+        }
+        int generators = 0;
+        int added = 0;
+        int skippedExisting = 0;
+        for (Generator g : network.getGenerators()) {
+            generators++;
+            if (onlyMissing && g.getExtension(ActivePowerControl.class) != null) {
+                skippedExisting++;
+                continue;
+            }
+            g.newExtension(ActivePowerControlAdder.class)
+                    .withParticipate(true)
+                    .withDroop(droop)
+                    .withParticipationFactor(participationFactor(g))
+                    .add();
+            added++;
+        }
+        return new ActivePowerControlStats(generators, added, skippedExisting);
+    }
+
+    private static double participationFactor(Generator g) {
+        for (double value : new double[]{g.getMaxP(), g.getTargetP()}) {
+            if (Double.isFinite(value) && value > 0) {
+                return value;
+            }
+        }
+        return 1.0;
     }
 
     // -----------------------------------------------------------------------
