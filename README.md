@@ -150,6 +150,39 @@ peaks at 80 % of the permanent limit with no overloads throughout:
 the full set from scratch; `case9241pegase` needs the automatic DC-start
 fallback to converge.
 
+## Completing missing reactive limits and tap changers
+
+`python/complete_network.py` (and the Java `NetworkCompleter` / `complete-network`
+CLI) fill two other things a case is often missing, again sized from a load flow:
+
+- **Generator reactive limits** — `add_reactive_limits` gives a generator a
+  finite MIN_MAX band when it has none or carries a placeholder "infinite" one
+  (the `|Q| >= 1e4` values MATPOWER/PEGASE use for "unlimited"). The band is
+  `Q = sqrt(ratedS^2 - P^2)` when a rated apparent power is known, else a power
+  factor applied to the active power. Real existing bands and reactive
+  capability curves are left untouched.
+- **Ratio tap changers** — `add_ratio_tap_changers` gives a two-winding
+  transformer a voltage-regulating ratio tap changer when it has none: symmetric
+  steps around `rho = 1` (±10 % over 8 steps by default) with the tap at
+  **neutral**, regulating the side-2 voltage to its base-case value. At the
+  neutral tap the transformer is electrically identical to before, so the base
+  case is unchanged (max ΔV ≈ 0); the regulator only acts once tap control is
+  switched on, and its setpoint already equals the current voltage.
+
+Phase tap changers are deliberately **not** synthesized — a phase shifter is a
+specific physical device, and cases that use them already carry them (PEGASE 13k
+has 74). On `case13659pegase` this fills the 7 placeholder-infinite reactive
+bands and adds a ratio tap changer to the 5 655 transformers that lack one
+(leaving the 74 phase-shifters alone). Python and Java produce identical counts.
+
+```
+cd python
+python3 complete_network.py --builtin ieee14
+python3 complete_network.py -i case13659pegase.mat -o out.xiidm
+python3 complete_network.py -i case.xiidm --reactive-limits    # only one completion
+python3 complete_network.py -i case.xiidm --ratio-tap-changers --rtc-steps 8 --rtc-step 0.0125
+```
+
 ## Method (per-unit, on HV side)
 
 ```
