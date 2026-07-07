@@ -125,7 +125,9 @@ def _sized_reactive(g, power_factor: float, threshold: float) -> Optional[float]
         if q > 0:
             return q
     if math.isfinite(p) and p != 0:
-        return abs(p) * math.tan(math.acos(power_factor))
+        q = abs(p) * math.tan(math.acos(power_factor))
+        if q > 0:  # unity power factor gives no reactive band -> leave unsized
+            return q
     return None
 
 

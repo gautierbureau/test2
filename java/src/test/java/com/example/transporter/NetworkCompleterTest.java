@@ -146,6 +146,30 @@ class NetworkCompleterTest {
     }
 
     @Test
+    void reactiveUnityPowerFactorLeavesUnsized() {
+        Network net = IeeeCdfNetworkFactory.create14();  // no rated_s
+        NetworkCompleter.ReactiveStats stats = NetworkCompleter.addReactiveLimits(net,
+                NetworkCompleter.ReactiveConfig.defaults()
+                        .withPowerFactor(1.0).withOnlyMissing(false));
+        // Unity power factor -> zero band -> left unsized, not a degenerate [0,0].
+        assertEquals(0, stats.filled());
+        assertEquals(stats.generators(), stats.skippedNoSize());
+    }
+
+    @Test
+    void nonRegulatingTapChangerKeepsTargetVoltage() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        NetworkCompleter.addRatioTapChangers(net,
+                NetworkCompleter.RatioTapConfig.defaults().withRegulating(false));
+        RatioTapChanger rtc = net.getTwoWindingsTransformers().iterator().next()
+                .getRatioTapChanger();
+        assertFalse(rtc.isRegulating());
+        // The base-case setpoint is still stored, so a later flip to regulating
+        // has a valid target rather than NaN.
+        assertTrue(Double.isFinite(rtc.getTargetV()) && rtc.getTargetV() > 0);
+    }
+
+    @Test
     void ratioTapChangersRejectBadConfig() {
         Network net = IeeeCdfNetworkFactory.create14();
         assertThrows(IllegalArgumentException.class, () -> NetworkCompleter.addRatioTapChangers(
