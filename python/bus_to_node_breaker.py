@@ -18,11 +18,12 @@ Options
     busbar section per generator, and each generator is placed on its own
     section - the usual layout for a multi-unit power station.
 
-Supported equipment: generators (min/max or curve reactive limits), loads,
-linear/non-linear shunt compensators, lines and two-winding transformers, plus
-bus couplers. This covers the IEEE cases and the PEGASE networks. Types not yet
-ported (batteries, SVCs, boundary lines, HVDC, tie lines, 3-winding
-transformers) raise ``NotImplementedError``.
+Supported equipment: generators, loads, batteries, static var compensators,
+dangling (boundary) lines, VSC and LCC converter stations (all reconnected as
+injection bays); lines, two- and three-winding transformers with their
+ratio/phase tap changers; HVDC lines; tie lines; linear/non-linear shunt
+compensators; and bus couplers. Only grounds are left out and raise
+``NotImplementedError``.
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ class _BusbarAssignment:
         self._one_per_gen = one_busbar_per_generator
         self._gens_per_bus = gens_per_bus
         self._sections: Dict[str, List[str]] = {}
+        self._node_of: Dict[str, int] = {}
         self._feeder_cursor: Dict[str, int] = defaultdict(int)
         self._gen_cursor: Dict[str, int] = defaultdict(int)
 
@@ -59,8 +61,12 @@ class _BusbarAssignment:
                 wanted = max(wanted, gens)
         return max(1, wanted)
 
-    def register(self, bus_id: str, bbs_id: str) -> None:
+    def register(self, bus_id: str, bbs_id: str, node: int) -> None:
         self._sections.setdefault(bus_id, []).append(bbs_id)
+        self._node_of[bbs_id] = node
+
+    def node_of(self, bbs_id: str) -> int:
+        return self._node_of[bbs_id]
 
     def sections_of(self, bus_id: str) -> List[str]:
         sections = self._sections.get(bus_id)
@@ -105,11 +111,23 @@ def convert(source: pn.Network, busbar_sections_per_bus: int = 1,
     _copy_bus_couplers(source, target, busbars)
 
     orders: Dict[str, int] = defaultdict(lambda: 1)
+    # Injections.
     _copy_generators(source, target, busbars, orders)
     _copy_loads(source, target, busbars, orders)
     _copy_shunts(source, target, busbars, orders)
+    _copy_batteries(source, target, busbars, orders)
+    _copy_static_var_compensators(source, target, busbars, orders)
+    _copy_boundary_lines(source, target, busbars, orders)
+    _copy_vsc_converter_stations(source, target, busbars, orders)
+    _copy_lcc_converter_stations(source, target, busbars, orders)
+    # Branches.
     _copy_lines(source, target, busbars, orders)
     _copy_two_windings_transformers(source, target, busbars, orders)
+    _copy_three_windings_transformers(source, target, busbars)
+    # Networks-level links (their endpoints now exist).
+    _copy_hvdc_lines(source, target)
+    _copy_tie_lines(source, target)
+    # Tap changers, once every terminal exists.
     _copy_ratio_tap_changers(source, target)
     _copy_phase_tap_changers(source, target)
 
@@ -166,8 +184,8 @@ def _create_busbars(source: pn.Network, target: pn.Network,
                 ids.append(bbs_id)
                 vl_ids.append(vl_id)
                 nodes.append(node)
+                busbars.register(bus_id, bbs_id, node)
                 node += 1
-                busbars.register(bus_id, bbs_id)
                 if prev is not None:
                     couplings.append((prev, bbs_id))
                 prev = bbs_id
@@ -283,6 +301,105 @@ def _copy_shunts(source, target, busbars, orders):
         linear_model_df=linear_df, non_linear_model_df=nonlinear_df)
 
 
+def _copy_reactive_limits(source, target, ids, getter_name):
+    """Copy min/max or curve reactive limits for a set of element ids."""
+    df = getattr(source, getter_name)(all_attributes=True)
+    df = df[df.index.isin(ids)]
+    minmax = df[df["reactive_limits_kind"] == "MIN_MAX"]
+    if not minmax.empty:
+        target.create_minmax_reactive_limits(
+            id=list(minmax.index),
+            min_q=list(minmax["min_q"]), max_q=list(minmax["max_q"]))
+    curve_ids = df.index[df["reactive_limits_kind"] == "CURVE"]
+    if len(curve_ids):
+        pts = source.get_reactive_capability_curve_points()
+        pts = pts[pts.index.get_level_values(0).isin(curve_ids)].reset_index()
+        target.create_reactive_capability_curve_points(
+            id=list(pts["id"]), p=list(pts["p"]),
+            min_q=list(pts["min_q"]), max_q=list(pts["max_q"]))
+
+
+def _copy_batteries(source, target, busbars, orders):
+    bats = source.get_batteries(all_attributes=True)
+    if bats.empty:
+        return
+    rows = []
+    for bid, b in bats.iterrows():
+        rows.append({
+            "id": bid, "min_p": b["min_p"], "max_p": b["max_p"],
+            "target_p": b["target_p"], "target_q": b["target_q"],
+            "bus_or_busbar_section_id": busbars.pick(b["bus_breaker_bus_id"], False),
+            "position_order": _next_order(orders, b["voltage_level_id"]),
+        })
+    pn.create_battery_bay(target, pd.DataFrame(rows).set_index("id"))
+    _copy_reactive_limits(source, target, list(bats.index), "get_batteries")
+
+
+def _copy_static_var_compensators(source, target, busbars, orders):
+    svcs = source.get_static_var_compensators(all_attributes=True)
+    if svcs.empty:
+        return
+    rows = []
+    for sid, svc in svcs.iterrows():
+        rows.append({
+            "id": sid, "b_min": svc["b_min"], "b_max": svc["b_max"],
+            "regulation_mode": svc["regulation_mode"],
+            "regulating": svc["regulating"],
+            "target_v": svc["target_v"], "target_q": svc["target_q"],
+            "bus_or_busbar_section_id": busbars.pick(svc["bus_breaker_bus_id"], False),
+            "position_order": _next_order(orders, svc["voltage_level_id"]),
+        })
+    pn.create_static_var_compensator_bay(target, pd.DataFrame(rows).set_index("id"))
+
+
+def _copy_boundary_lines(source, target, busbars, orders):
+    bls = source.get_boundary_lines(all_attributes=True)
+    if bls.empty:
+        return
+    rows = []
+    for bid, bl in bls.iterrows():
+        key = bl["pairing_key"]
+        rows.append({
+            "id": bid, "p0": bl["p0"], "q0": bl["q0"],
+            "r": bl["r"], "x": bl["x"], "g": bl["g"], "b": bl["b"],
+            "pairing_key": key if isinstance(key, str) else "",
+            "bus_or_busbar_section_id": busbars.pick(bl["bus_breaker_bus_id"], False),
+            "position_order": _next_order(orders, bl["voltage_level_id"]),
+        })
+    pn.create_boundary_line_bay(target, pd.DataFrame(rows).set_index("id"))
+
+
+def _copy_vsc_converter_stations(source, target, busbars, orders):
+    vscs = source.get_vsc_converter_stations(all_attributes=True)
+    if vscs.empty:
+        return
+    rows = []
+    for vid, v in vscs.iterrows():
+        rows.append({
+            "id": vid, "loss_factor": v["loss_factor"],
+            "voltage_regulator_on": v["voltage_regulator_on"],
+            "target_v": v["target_v"], "target_q": v["target_q"],
+            "bus_or_busbar_section_id": busbars.pick(v["bus_breaker_bus_id"], False),
+            "position_order": _next_order(orders, v["voltage_level_id"]),
+        })
+    pn.create_vsc_converter_station_bay(target, pd.DataFrame(rows).set_index("id"))
+    _copy_reactive_limits(source, target, list(vscs.index), "get_vsc_converter_stations")
+
+
+def _copy_lcc_converter_stations(source, target, busbars, orders):
+    lccs = source.get_lcc_converter_stations(all_attributes=True)
+    if lccs.empty:
+        return
+    rows = []
+    for lid, l in lccs.iterrows():
+        rows.append({
+            "id": lid, "power_factor": l["power_factor"], "loss_factor": l["loss_factor"],
+            "bus_or_busbar_section_id": busbars.pick(l["bus_breaker_bus_id"], False),
+            "position_order": _next_order(orders, l["voltage_level_id"]),
+        })
+    pn.create_lcc_converter_station_bay(target, pd.DataFrame(rows).set_index("id"))
+
+
 # ---------------------------------------------------------------------------
 # Branches
 # ---------------------------------------------------------------------------
@@ -322,6 +439,77 @@ def _copy_two_windings_transformers(source, target, busbars, orders):
             "position_order_2": _next_order(orders, tx["voltage_level2_id"]),
         })
     pn.create_2_windings_transformer_bays(target, pd.DataFrame(rows).set_index("id"))
+
+
+def _copy_three_windings_transformers(source, target, busbars):
+    """
+    Three-winding transformers have no ready-made bay helper, so each of the
+    three legs gets a hand-built bay: a disconnector from its busbar section to
+    a fresh node, then a breaker to the node the leg terminal sits on.
+    """
+    t3s = source.get_3_windings_transformers(all_attributes=True)
+    if t3s.empty:
+        return
+
+    next_node: Dict[str, int] = {}
+
+    def alloc(vl_id: str) -> int:
+        if vl_id not in next_node:
+            nodes = target.get_node_breaker_topology(vl_id).nodes
+            next_node[vl_id] = (int(nodes.index.max()) + 1) if len(nodes) else 0
+        node = next_node[vl_id]
+        next_node[vl_id] = node + 1
+        return node
+
+    sw_id, sw_vl, sw_n1, sw_n2, sw_kind = [], [], [], [], []
+    rows = []
+    for tid, t in t3s.iterrows():
+        row = {"id": tid, "rated_u0": t["rated_u0"]}
+        for side in (1, 2, 3):
+            vl_id = t[f"voltage_level{side}_id"]
+            bbs = busbars.pick(t[f"bus_breaker_bus{side}_id"], False)
+            bbs_node = busbars.node_of(bbs)
+            mid, equip = alloc(vl_id), alloc(vl_id)
+            sw_id += [f"{tid}_DISC_{side}", f"{tid}_BRK_{side}"]
+            sw_vl += [vl_id, vl_id]
+            sw_n1 += [bbs_node, mid]
+            sw_n2 += [mid, equip]
+            sw_kind += ["DISCONNECTOR", "BREAKER"]
+            row.update({
+                f"voltage_level{side}_id": vl_id, f"node{side}": equip,
+                f"rated_u{side}": t[f"rated_u{side}"],
+                f"r{side}": t[f"r{side}"], f"x{side}": t[f"x{side}"],
+                f"g{side}": t[f"g{side}"], f"b{side}": t[f"b{side}"],
+            })
+        rows.append(row)
+    target.create_switches(id=sw_id, voltage_level_id=sw_vl, node1=sw_n1, node2=sw_n2,
+                           kind=sw_kind, open=[False] * len(sw_id))
+    target.create_3_windings_transformers(pd.DataFrame(rows).set_index("id"))
+
+
+def _copy_hvdc_lines(source, target):
+    hv = source.get_hvdc_lines(all_attributes=True)
+    if hv.empty:
+        return
+    target.create_hvdc_lines(pd.DataFrame({
+        "id": list(hv.index),
+        "converter_station1_id": list(hv["converter_station1_id"]),
+        "converter_station2_id": list(hv["converter_station2_id"]),
+        "r": list(hv["r"]), "nominal_v": list(hv["nominal_v"]),
+        "max_p": list(hv["max_p"]), "target_p": list(hv["target_p"]),
+        "converters_mode": list(hv["converters_mode"]),
+    }).set_index("id"))
+
+
+def _copy_tie_lines(source, target):
+    tl = source.get_tie_lines(all_attributes=True)
+    if tl.empty:
+        return
+    target.create_tie_lines(pd.DataFrame({
+        "id": list(tl.index),
+        "boundary_line1_id": list(tl["boundary_line1_id"]),
+        "boundary_line2_id": list(tl["boundary_line2_id"]),
+    }).set_index("id"))
 
 
 def _regulated_side(tid, reg_bus, txs):
@@ -433,23 +621,17 @@ def validate(source: pn.Network, target: pn.Network) -> dict:
 # ---------------------------------------------------------------------------
 
 def _reject_unsupported(source: pn.Network) -> None:
-    checks = [
-        ("batteries", source.get_batteries),
-        ("static var compensators", source.get_static_var_compensators),
-        ("VSC converter stations", source.get_vsc_converter_stations),
-        ("LCC converter stations", source.get_lcc_converter_stations),
-        ("HVDC lines", source.get_hvdc_lines),
-        ("3-winding transformers", source.get_3_windings_transformers),
-    ]
-    for name, getter in checks:
+    # Every standard connectable is handled; only grounds (a rare, injection-less
+    # connection to earth) are left out, matching the Java converter.
+    getter = getattr(source, "get_grounds", None)
+    if getter is not None:
         try:
-            df = getter()
+            grounds = getter()
         except Exception:  # noqa: BLE001 - element type may be absent
-            continue
-        if not df.empty:
+            grounds = None
+        if grounds is not None and not grounds.empty:
             raise NotImplementedError(
-                f"{name} are not supported yet by the pypowsybl converter "
-                f"({len(df)} found)")
+                f"grounds are not supported yet ({len(grounds)} found)")
 
 
 # ---------------------------------------------------------------------------

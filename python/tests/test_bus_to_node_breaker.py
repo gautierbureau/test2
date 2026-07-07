@@ -6,6 +6,7 @@ topology as expected (one busbar section per bus, or several when requested)
 and stays electrically transparent under an AC load flow.
 """
 
+import pandas as pd
 import pypowsybl.network as pn
 import pytest
 
@@ -90,10 +91,104 @@ def test_one_busbar_per_generator():
     assert validate(net, target)["max_dv_kv"] < 1e-2
 
 
-def test_rejects_unsupported_type():
+def _extended_ieee14():
+    """IEEE-14 grown with one of every supported extra equipment type."""
     net = pn.create_ieee14()
-    net.create_batteries(
-        id=["BAT"], voltage_level_id=["VL2"], bus_id=["B2"],
-        max_p=[10.0], min_p=[-10.0], target_p=[1.0], target_q=[0.0])
+    net.create_batteries(id=["BAT1"], voltage_level_id=["VL10"], bus_id=["B10"],
+                         min_p=[-20.0], max_p=[20.0], target_p=[5.0], target_q=[0.0])
+    net.create_minmax_reactive_limits(id=["BAT1"], min_q=[-10.0], max_q=[10.0])
+    net.create_static_var_compensators(
+        id=["SVC1"], voltage_level_id=["VL4"], bus_id=["B4"], b_min=[-0.005],
+        b_max=[0.005], regulation_mode=["VOLTAGE"], regulating=[True],
+        target_v=[137.4], target_q=[0.0])
+    net.create_boundary_lines(id=["DL1"], voltage_level_id=["VL13"], bus_id=["B13"],
+                              p0=[3.0], q0=[1.0], r=[0.5], x=[1.0], g=[0.0], b=[0.0])
+    sh = pd.DataFrame.from_records(index="id", data=[
+        {"id": "SHNL1", "voltage_level_id": "VL14", "bus_id": "B14",
+         "model_type": "NON_LINEAR", "section_count": 1}])
+    nl = pd.DataFrame.from_records(index="id", data=[
+        {"id": "SHNL1", "g": 0.0, "b": 0.02}, {"id": "SHNL1", "g": 0.0, "b": 0.05}])
+    net.create_shunt_compensators(sh, non_linear_model_df=nl)
+    net.create_vsc_converter_stations(
+        id=["VSC_A", "VSC_B"], voltage_level_id=["VL5", "VL2"], bus_id=["B5", "B2"],
+        loss_factor=[1.0, 1.0], voltage_regulator_on=[False, False],
+        target_q=[0.0, 0.0], target_v=[float("nan"), float("nan")])
+    net.create_minmax_reactive_limits(id=["VSC_A", "VSC_B"], min_q=[-50.0, -50.0],
+                                      max_q=[50.0, 50.0])
+    net.create_hvdc_lines(id=["HVDC1"], converter_station1_id=["VSC_A"],
+                          converter_station2_id=["VSC_B"], r=[1.0], nominal_v=[150.0],
+                          max_p=[60.0], target_p=[15.0],
+                          converters_mode=["SIDE_1_RECTIFIER_SIDE_2_INVERTER"])
+    net.create_lcc_converter_stations(
+        id=["LCC_A", "LCC_B"], voltage_level_id=["VL3", "VL6"], bus_id=["B3", "B6"],
+        power_factor=[0.9, 0.9], loss_factor=[1.1, 1.1])
+    net.create_hvdc_lines(id=["HVDC_LCC"], converter_station1_id=["LCC_A"],
+                          converter_station2_id=["LCC_B"], r=[1.5], nominal_v=[150.0],
+                          max_p=[50.0], target_p=[10.0],
+                          converters_mode=["SIDE_1_RECTIFIER_SIDE_2_INVERTER"])
+    net.create_boundary_lines(id=["DLT_A"], voltage_level_id=["VL10"], bus_id=["B10"],
+                              p0=[0.0], q0=[0.0], r=[0.1], x=[0.4], g=[0.0], b=[0.0],
+                              pairing_key=["XN_10_11"])
+    net.create_boundary_lines(id=["DLT_B"], voltage_level_id=["VL11"], bus_id=["B11"],
+                              p0=[0.0], q0=[0.0], r=[0.1], x=[0.4], g=[0.0], b=[0.0],
+                              pairing_key=["XN_10_11"])
+    net.create_tie_lines(id=["TIE1"], boundary_line1_id=["DLT_A"],
+                         boundary_line2_id=["DLT_B"])
+    net.create_substations(id=["S_3W"])
+    net.create_voltage_levels(id=["VL_3W_HV", "VL_3W_MV", "VL_3W_LV"],
+                              substation_id=["S_3W"] * 3, topology_kind=["BUS_BREAKER"] * 3,
+                              nominal_v=[135.0, 33.0, 11.0])
+    net.create_buses(id=["B_3W_HV", "B_3W_MV", "B_3W_LV"],
+                     voltage_level_id=["VL_3W_HV", "VL_3W_MV", "VL_3W_LV"])
+    net.create_lines(id=["L_5_3W"], voltage_level1_id=["VL5"], bus1_id=["B5"],
+                     voltage_level2_id=["VL_3W_HV"], bus2_id=["B_3W_HV"], r=[2.0],
+                     x=[6.0], g1=[0.0], b1=[0.0], g2=[0.0], b2=[0.0])
+    net.create_3_windings_transformers(
+        id=["T3W"], rated_u0=[135.0],
+        voltage_level1_id=["VL_3W_HV"], bus1_id=["B_3W_HV"], rated_u1=[135.0],
+        r1=[0.5], x1=[10.0], g1=[0.0], b1=[0.0],
+        voltage_level2_id=["VL_3W_MV"], bus2_id=["B_3W_MV"], rated_u2=[33.0],
+        r2=[0.5], x2=[8.0], g2=[0.0], b2=[0.0],
+        voltage_level3_id=["VL_3W_LV"], bus3_id=["B_3W_LV"], rated_u3=[11.0],
+        r3=[0.5], x3=[6.0], g3=[0.0], b3=[0.0])
+    net.create_loads(id=["LOAD_3W_MV", "LOAD_3W_LV"],
+                     voltage_level_id=["VL_3W_MV", "VL_3W_LV"],
+                     bus_id=["B_3W_MV", "B_3W_LV"], p0=[20.0, 10.0], q0=[5.0, 3.0])
+    net.create_substations(id=["S_COUP"])
+    net.create_voltage_levels(id=["VL_COUP"], substation_id=["S_COUP"],
+                              topology_kind=["BUS_BREAKER"], nominal_v=[135.0])
+    net.create_buses(id=["B_COUP_A", "B_COUP_B"], voltage_level_id=["VL_COUP", "VL_COUP"])
+    net.create_switches(id=["COUPLER1"], voltage_level_id=["VL_COUP"],
+                        bus1_id=["B_COUP_A"], bus2_id=["B_COUP_B"], kind=["BREAKER"],
+                        open=[False])
+    net.create_lines(id=["L_1_COUP"], voltage_level1_id=["VL1"], bus1_id=["B1"],
+                     voltage_level2_id=["VL_COUP"], bus2_id=["B_COUP_A"], r=[2.0],
+                     x=[6.0], g1=[0.0], b1=[0.0], g2=[0.0], b2=[0.0])
+    net.create_loads(id=["LOAD_COUP"], voltage_level_id=["VL_COUP"], bus_id=["B_COUP_B"],
+                     p0=[10.0], q0=[3.0])
+    return net
+
+
+def test_extended_network_all_types():
+    source = _extended_ieee14()
+    target = convert(source)
+
+    # Every added type survives with its count preserved.
+    for getter in ("get_batteries", "get_static_var_compensators", "get_dangling_lines",
+                   "get_vsc_converter_stations", "get_lcc_converter_stations",
+                   "get_hvdc_lines", "get_tie_lines", "get_3_windings_transformers"):
+        assert len(getattr(target, getter)()) == len(getattr(source, getter)()), getter
+    assert set(target.get_voltage_levels(all_attributes=True)["topology_kind"]) == {"NODE_BREAKER"}
+    assert "NON_LINEAR" in set(target.get_shunt_compensators()["model_type"])
+
+    result = validate(source, target)
+    assert result["source_converged"] and result["target_converged"]
+    assert result["max_dv_kv"] < 1e-2
+    assert result["max_dangle_deg"] < 1e-1
+
+
+def test_rejects_node_breaker_input():
+    # A network that is already node-breaker cannot be converted.
+    node_breaker = convert(pn.create_ieee14())
     with pytest.raises(NotImplementedError):
-        convert(net)
+        convert(node_breaker)

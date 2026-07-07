@@ -43,12 +43,14 @@ load flow.
 
 `convert(network, busbar_sections_per_bus=1, one_busbar_per_generator=True)`
 rebuilds the network with pypowsybl's `create_*_bay` / `create_coupling_device`
-helpers. It supports generators (with reactive limits), loads, linear/non-linear
-shunts, lines and two-winding transformers (with ratio/phase tap changers) — the
-types present in the IEEE and PEGASE cases — plus the `--busbars-per-bus` and
-one-busbar-per-generator options. Validated bus-for-bus on IEEE-14/118/300 and
-on PEGASE 1354/2869/9241 (the last needs a DC-start fallback, applied
-automatically by `validate()`).
+helpers. It supports the same equipment as the Java version — generators,
+loads, batteries, static var compensators, boundary lines, VSC/LCC converter
+stations, lines, two- and three-winding transformers (with ratio/phase tap
+changers), HVDC lines, tie lines, linear/non-linear shunts and bus couplers
+(only grounds are unhandled) — plus the `--busbars-per-bus` and
+one-busbar-per-generator options. Validated bus-for-bus on IEEE-14/118/300, on
+an extended IEEE-14 exercising every added type, and on PEGASE 1354/2869/9241
+(the last needs a DC-start fallback, applied automatically by `validate()`).
 
 ```
 cd python
