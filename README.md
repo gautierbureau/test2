@@ -30,6 +30,25 @@ capability curve transported analytically through the transformer pi-model.
        -o /tmp/equivalent.xiidm --validate
   ```
 
+## Bus-breaker → node-breaker conversion (Java, new)
+
+`java/` also contains a **bus-breaker to node-breaker converter**
+(`BusToNodeBreakerConverter`). Given a bus-breaker network it builds an
+electrically identical node-breaker network: one busbar section per bus, with
+every feeder reconnected through a disconnector + breaker bay (powsybl's
+`CreateFeederBay` / `CreateBranchFeederBays`). Scoped and validated on IEEE-14 —
+an AC load flow matches the original bus-for-bus (max deviation ≈1e-4 kV).
+
+```
+cd java
+mvn clean package -DskipTests
+java -cp target/curve-transporter-1.0.0-shaded.jar \
+     com.example.transporter.ConvertToNodeBreaker \
+     --ieee14 -o /tmp/ieee14_nb.xiidm --validate
+```
+
+See `java/README.md` for supported equipment and current limitations.
+
 The test network is stored as a resource file at
 `java/src/main/resources/test_network.xiidm`. It was exported by the Python
 script at IIDM schema version 1.15 (compatible with powsybl-core 7.x). To
