@@ -135,6 +135,9 @@ def convert(source: pn.Network, busbar_sections_per_bus: int = 1,
     # Tap changers, once every terminal exists.
     _copy_ratio_tap_changers(source, target)
     _copy_phase_tap_changers(source, target)
+    # Operational limits and extensions, once every element exists.
+    _copy_operational_limits(source, target)
+    _copy_extensions(source, target)
 
     return target
 
@@ -572,6 +575,101 @@ def _copy_phase_tap_changers(source, target):
     steps = steps[steps["id"].isin(ptc.index)]
     steps_df = steps[["id", "rho", "alpha", "r", "x", "g", "b"]].set_index("id")
     target.create_phase_tap_changers(ptc_df, steps_df)
+
+
+# ---------------------------------------------------------------------------
+# Operational limits and extensions
+# ---------------------------------------------------------------------------
+
+# element getter -> (updater, [selected-group column per side], [iidm side label per side])
+_SELECTED_GROUP_SPEC = {
+    "get_lines": ("update_lines",
+                  ["selected_limits_group_1", "selected_limits_group_2"], ["ONE", "TWO"]),
+    "get_2_windings_transformers": ("update_2_windings_transformers",
+                                    ["selected_limits_group_1", "selected_limits_group_2"],
+                                    ["ONE", "TWO"]),
+    "get_3_windings_transformers": ("update_3_windings_transformers",
+                                    ["selected_limits_group_1", "selected_limits_group_2",
+                                     "selected_limits_group_3"], ["ONE", "TWO", "THREE"]),
+    "get_boundary_lines": ("update_boundary_lines", ["selected_limits_group"], ["NONE"]),
+}
+
+# Extensions the conversion itself sets (feeder ordering) - never copy these over.
+_CONVERSION_OWNED_EXTENSIONS = {"position", "busbarSectionPosition"}
+
+
+def _copy_operational_limits(source: pn.Network, target: pn.Network) -> None:
+    """Copy every operational-limit group and restore each element's active group.
+
+    The converter rebuilds the network from scratch, so without this every
+    current / apparent-power / active-power limit (and the selected group) would
+    be lost.
+    """
+    limits = source.get_operational_limits(show_inactive_sets=True)
+    if not limits.empty:
+        r = limits.reset_index()
+        create_df = pd.DataFrame({
+            "element_id": r["element_id"], "side": r["side"], "name": r["name"],
+            "type": r["type"], "value": r["value"],
+            "acceptable_duration": r["acceptable_duration"], "group_name": r["group_name"],
+        }).set_index("element_id")
+        target.create_operational_limits(create_df)
+
+    _restore_selected_groups(source, target)
+
+
+def _restore_selected_groups(source: pn.Network, target: pn.Network) -> None:
+    # A group can only be selected on a side that actually carries a limit there,
+    # so restrict to (element, side, group) triples that now exist on the target.
+    present = set()
+    tgt_limits = target.get_operational_limits(show_inactive_sets=True)
+    if not tgt_limits.empty:
+        idx = tgt_limits.index
+        present = set(zip(idx.get_level_values("element_id"),
+                          idx.get_level_values("side"),
+                          idx.get_level_values("group_name")))
+
+    for getter_name, (updater, group_cols, side_labels) in _SELECTED_GROUP_SPEC.items():
+        df = getattr(source, getter_name)(all_attributes=True)
+        if df.empty:
+            continue
+        for col, side in zip(group_cols, side_labels):
+            if col not in df.columns:
+                continue
+            ids, groups = [], []
+            for eid, grp in df[col].items():
+                if isinstance(grp, str) and grp and (eid, side, grp) in present:
+                    ids.append(eid)
+                    groups.append(grp)
+            if ids:
+                getattr(target, updater)(id=ids, **{col: groups})
+
+
+def _copy_extensions(source: pn.Network, target: pn.Network) -> None:
+    """Copy element-keyed extensions onto the rebuilt network.
+
+    Covers extensions attached to a single connectable by its id
+    (activePowerControl, generatorShortCircuit, entsoeCategory, ...). Extensions
+    the conversion manages itself (feeder position) are skipped, as are
+    topology/terminal-bound extensions (e.g. slackTerminal) whose reference does
+    not survive a rebuild - those are indexed by something other than ``id`` and
+    are left out.
+    """
+    for name in pn.get_extensions_information().index:
+        if name in _CONVERSION_OWNED_EXTENSIONS:
+            continue
+        try:
+            df = source.get_extensions(name)
+        except Exception:  # noqa: BLE001 - extension may be unsupported here
+            continue
+        # Only copy extensions keyed by a single element id; terminal/position
+        # bound extensions are indexed differently and cannot be blindly rebuilt.
+        if df is None or df.empty or df.index.name != "id":
+            continue
+        try:
+            target.create_extensions(name, df)
+        except Exception:  # noqa: BLE001 - element absent or schema mismatch
+            continue
 
 
 # ---------------------------------------------------------------------------

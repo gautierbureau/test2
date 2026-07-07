@@ -118,9 +118,13 @@ Supported equipment: generators (min/max or curve reactive limits), loads,
 batteries, static var compensators, boundary lines (the type powsybl 7.3
 renamed from `DanglingLine`), VSC and LCC converter stations (all reconnected
 as injection bays); lines, two- and three-winding
-transformers with their ratio/phase tap changers and current limits; HVDC
+transformers with their ratio/phase tap changers; HVDC
 lines; tie lines; linear/non-linear shunts; and bus couplers (mapped to
-breakers between busbars). The only connectable type still unhandled is
+breakers between busbars). All **operational-limit groups** (current /
+apparent-power / active-power limits, every named group with the selected one
+restored) are copied over, as is the `activePowerControl` extension; the powsybl
+Java model has no generic extension clone, so terminal- and position-bound
+extensions are left to the rebuild. The only connectable type still unhandled is
 `Ground`, which raises a clear `UnsupportedOperationException` rather than
 failing silently.
 
