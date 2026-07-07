@@ -99,7 +99,9 @@ curve-transporter/
     ├── ExtendedIeee14Factory.java      IEEE-14 grown with extra equipment types
     ├── ConvertToNodeBreaker.java       picocli CLI for the converter
     ├── CurrentLimitsGenerator.java     load-flow-based current limit sets
-    └── AddCurrentLimits.java           picocli CLI for the limit generator
+    ├── AddCurrentLimits.java           picocli CLI for the limit generator
+    ├── NetworkCompleter.java           fill missing reactive limits + ratio taps
+    └── CompleteNetwork.java            picocli CLI for the completer
 ```
 
 ## Bus-breaker → node-breaker conversion
@@ -229,6 +231,41 @@ Exercised on IEEE-14/300 and on the PEGASE cases:
 `*` case9241pegase needs the DC-start fallback to converge, applied
 automatically. `case13659pegase` carries no operational limits at all, so the
 tool builds the full set from scratch.
+
+## Completing missing reactive limits and tap changers
+
+`NetworkCompleter` (CLI `complete-network`) fills two other things a case is
+often missing, sized from a load flow — the Java port of Python's
+`complete_network.py`:
+
+- **`addReactiveLimits`** gives a generator a finite MIN_MAX band when it has
+  none or a placeholder "infinite" one (`|Q| >= 1e4`, the MATPOWER/PEGASE
+  "unlimited" convention). Sized as `Q = sqrt(ratedS^2 - P^2)` when a rated
+  apparent power is known, otherwise from a power factor on the active power.
+  Real existing bands and reactive capability curves are left untouched.
+- **`addRatioTapChangers`** gives a two-winding transformer a voltage-regulating
+  ratio tap changer when it has none: symmetric steps around `rho = 1` (±10 %
+  over 8 steps by default) with the tap at **neutral**, regulating the side-2
+  voltage to its base-case value. At the neutral tap the transformer is
+  electrically identical to before, so the base case is unchanged; the regulator
+  only acts once tap control is on, with its setpoint already at the current
+  voltage.
+
+Phase tap changers are deliberately not synthesized (a phase shifter is a
+physical device; cases that use them already carry them). With no flag, both
+completions run.
+
+```bash
+java -cp target/curve-transporter-1.0.0-shaded.jar \
+     com.example.transporter.CompleteNetwork --ieee14
+# -i case13659pegase.xiidm -o out.xiidm            (both completions)
+# --reactive-limits                                (only reactive limits)
+# --ratio-tap-changers --rtc-steps 8 --rtc-step 0.0125
+```
+
+On `case13659pegase` this fills the 7 placeholder reactive bands and adds a
+ratio tap changer to the 5 655 transformers lacking one (the 74 phase-shifters
+are left alone) — matching the Python module's counts.
 
 ## Dependencies
 
