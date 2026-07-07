@@ -149,10 +149,31 @@ def test_only_missing_preserves_existing_sets():
     assert groups == {"FIRST"}
 
 
+def test_partial_flow_branch_selects_only_live_sides():
+    # A three-winding transformer with one de-energised leg: that leg carries
+    # NaN, so no limit is created there and the group must not be selected on it
+    # (pypowsybl rejects selecting a group that has no limit on a side).
+    net = _extended_ieee14()
+    net.update_3_windings_transformers(id=["T3W"], connected3=[False])
+    stats = add_current_limits(net)  # must not raise
+    assert stats["skipped_no_flow"] >= 1
+
+    sel = net.get_3_windings_transformers(
+        attributes=["selected_limits_group_1", "selected_limits_group_2",
+                    "selected_limits_group_3"]).loc["T3W"]
+    assert sel["selected_limits_group_1"] == "LOADFLOW_BASED"
+    assert sel["selected_limits_group_2"] == "LOADFLOW_BASED"
+    assert sel["selected_limits_group_3"] != "LOADFLOW_BASED"  # dead leg untouched
+    # Still round-trips and stays within limits.
+    assert loading_report(net, run_loadflow=False)["overloaded"] == 0
+
+
 def test_rejects_bad_config():
     net = pn.create_ieee14()
     with pytest.raises(ValueError):
         add_current_limits(net, permanent_margin=0.0)
+    with pytest.raises(ValueError):
+        add_current_limits(net, permanent_margin=0.9)  # <= 1: limit below flow
     with pytest.raises(ValueError):
         add_current_limits(net, temporary_tiers=[(600, 0.9)])  # margin <= 1
     with pytest.raises(ValueError):
