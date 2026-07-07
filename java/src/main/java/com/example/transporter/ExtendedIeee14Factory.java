@@ -21,6 +21,10 @@ import com.powsybl.iidm.network.*;
  *       on its MV and LV sides;</li>
  *   <li>a VSC {@link HvdcLine} between B5 and B2 (both stations in
  *       reactive-power mode, so no voltage-control conflict);</li>
+ *   <li>an LCC {@link HvdcLine} between B3 and B6 (stations sat next to the
+ *       generators there for reactive support);</li>
+ *   <li>a {@link TieLine} (two paired dangling lines) in parallel with the
+ *       B10-B11 line;</li>
  *   <li>a two-busbar voltage level joined by a closed bus coupler, fed from B1
  *       with a load reachable only through the coupler.</li>
  * </ul>
@@ -46,6 +50,8 @@ public final class ExtendedIeee14Factory {
         addPhaseTapChanger(net);
         addThreeWindingsTransformer(net);
         addVscHvdc(net);
+        addLccHvdc(net);
+        addTieLine(net);
         addBusCoupler(net);
 
         return net;
@@ -186,6 +192,53 @@ public final class ExtendedIeee14Factory {
                 .setActivePowerSetpoint(15.0).setMaxP(60.0)
                 .setConverterStationId1("VSC_A")
                 .setConverterStationId2("VSC_B")
+                .add();
+    }
+
+    private static void addLccHvdc(Network net) {
+        // LCC stations consume reactive power, so sit them on buses that already
+        // have a generator (B3, B6) for local voltage support.
+        net.getVoltageLevel("VL3").newLccConverterStation()
+                .setId("LCC_A")
+                .setBus("B3").setConnectableBus("B3")
+                .setLossFactor(1.1f).setPowerFactor(0.9f)
+                .add();
+        net.getVoltageLevel("VL6").newLccConverterStation()
+                .setId("LCC_B")
+                .setBus("B6").setConnectableBus("B6")
+                .setLossFactor(1.1f).setPowerFactor(0.9f)
+                .add();
+        net.newHvdcLine()
+                .setId("HVDC_LCC")
+                .setR(1.5).setNominalV(150.0)
+                .setConvertersMode(HvdcLine.ConvertersMode.SIDE_1_RECTIFIER_SIDE_2_INVERTER)
+                .setActivePowerSetpoint(10.0).setMaxP(50.0)
+                .setConverterStationId1("LCC_A")
+                .setConverterStationId2("LCC_B")
+                .add();
+    }
+
+    private static void addTieLine(Network net) {
+        // Two paired half-lines joined at boundary key XN_10_11, forming a tie
+        // line in parallel with the existing B10-B11 line.
+        net.getVoltageLevel("VL10").newDanglingLine()
+                .setId("DLT_A")
+                .setBus("B10").setConnectableBus("B10")
+                .setP0(0.0).setQ0(0.0)
+                .setR(0.1).setX(0.4).setG(0.0).setB(0.0)
+                .setPairingKey("XN_10_11")
+                .add();
+        net.getVoltageLevel("VL11").newDanglingLine()
+                .setId("DLT_B")
+                .setBus("B11").setConnectableBus("B11")
+                .setP0(0.0).setQ0(0.0)
+                .setR(0.1).setX(0.4).setG(0.0).setB(0.0)
+                .setPairingKey("XN_10_11")
+                .add();
+        net.newTieLine()
+                .setId("TIE1")
+                .setDanglingLine1("DLT_A")
+                .setDanglingLine2("DLT_B")
                 .add();
     }
 

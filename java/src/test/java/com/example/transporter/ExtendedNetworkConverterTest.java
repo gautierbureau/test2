@@ -56,8 +56,16 @@ class ExtendedNetworkConverterTest {
         assertEquals(ShuntCompensatorModelType.NON_LINEAR,
                 target.getShuntCompensator("SHNL1").getModelType());
         assertEquals(source.getVscConverterStationCount(), target.getVscConverterStationCount());
+        assertEquals(source.getLccConverterStationCount(), target.getLccConverterStationCount());
+        assertNotNull(target.getLccConverterStation("LCC_A"));
         assertEquals(source.getHvdcLineCount(), target.getHvdcLineCount());
         assertNotNull(target.getHvdcLine("HVDC1"));
+        assertNotNull(target.getHvdcLine("HVDC_LCC"));
+        assertEquals(source.getTieLineCount(), target.getTieLineCount());
+        TieLine tie = target.getTieLine("TIE1");
+        assertNotNull(tie, "tie line should be re-paired");
+        assertEquals("DLT_A", tie.getDanglingLine1().getId());
+        assertEquals("DLT_B", tie.getDanglingLine2().getId());
         assertEquals(source.getThreeWindingsTransformerCount(),
                 target.getThreeWindingsTransformerCount());
         assertNotNull(target.getThreeWindingsTransformer("T3W"));

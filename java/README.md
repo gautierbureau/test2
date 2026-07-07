@@ -111,12 +111,13 @@ modifications. The transformation is purely topological, so a load flow on the
 result matches the original bus-for-bus.
 
 Supported equipment: generators (min/max or curve reactive limits), loads,
-batteries, static var compensators, dangling lines and VSC converter stations
-(all reconnected as injection bays); lines, two- and three-winding transformers
-with their ratio/phase tap changers and current limits; HVDC lines;
-linear/non-linear shunts; and bus couplers (mapped to breakers between
-busbars). Only LCC converter stations and tie lines are still unhandled — they
-raise a clear `UnsupportedOperationException` rather than failing silently.
+batteries, static var compensators, dangling lines, VSC and LCC converter
+stations (all reconnected as injection bays); lines, two- and three-winding
+transformers with their ratio/phase tap changers and current limits; HVDC
+lines; tie lines; linear/non-linear shunts; and bus couplers (mapped to
+breakers between busbars). The only connectable type still unhandled is
+`Ground`, which raises a clear `UnsupportedOperationException` rather than
+failing silently.
 
 Run it on the bundled IEEE-14 network, the extended IEEE-14 network (which adds
 one of every supported extra type), or any bus-breaker `.xiidm`:
@@ -126,8 +127,8 @@ java -cp target/curve-transporter-1.0.0-shaded.jar \
      com.example.transporter.ConvertToNodeBreaker \
      --ieee14 -o /tmp/ieee14_nb.xiidm --validate
 # --ieee14-extended : IEEE-14 + battery, SVC, dangling line, non-linear shunt,
-#                     ratio/phase tap changers, 3-winding transformer, VSC HVDC
-#                     and a bus coupler
+#                     ratio/phase tap changers, 3-winding transformer, VSC HVDC,
+#                     LCC HVDC, a tie line and a bus coupler
 # --input path/to/bus_breaker.xiidm -o out.xiidm --validate
 ```
 
