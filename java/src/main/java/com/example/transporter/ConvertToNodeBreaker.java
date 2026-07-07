@@ -64,6 +64,17 @@ public class ConvertToNodeBreaker implements Callable<Integer> {
             description = "Path to write the node-breaker network (.xiidm).")
     private Path output;
 
+    @Option(names = {"--busbars-per-bus"}, paramLabel = "N", defaultValue = "1",
+            description = "Number of busbar sections to create per bus, chained by closed "
+                    + "coupler breakers (default: ${DEFAULT-VALUE}). Feeders are spread across "
+                    + "them.")
+    private int busbarsPerBus;
+
+    @Option(names = {"--no-generator-busbars"},
+            description = "Disable the default policy of giving each generator its own busbar "
+                    + "section on buses that host more than one generator.")
+    private boolean noGeneratorBusbars;
+
     @Option(names = {"--validate"},
             description = "Run an AC load flow on both networks and compare bus voltages.")
     private boolean validate;
@@ -79,7 +90,8 @@ public class ConvertToNodeBreaker implements Callable<Integer> {
                     source.getId(), source.getVoltageLevelCount(),
                     source.getGeneratorCount(), source.getLoadCount());
 
-            Network target = BusToNodeBreakerConverter.convert(source);
+            Network target = BusToNodeBreakerConverter.convert(
+                    source, busbarsPerBus, !noGeneratorBusbars);
 
             System.out.printf("Converted '%s' to node-breaker: %d busbar section(s) "
                             + "over %d voltage level(s).%n",
