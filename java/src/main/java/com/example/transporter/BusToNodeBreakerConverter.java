@@ -48,7 +48,7 @@ import java.util.Map;
  * rebuilt rather than mutated in place.
  *
  * <p>Supported equipment: generators, loads, batteries, static var
- * compensators, dangling lines, VSC and LCC converter stations (all reconnected
+ * compensators, boundary lines, VSC and LCC converter stations (all reconnected
  * as injection bays); lines, two- and three-winding transformers with their
  * ratio/phase tap changers and current limits; HVDC lines; tie lines; linear
  * and non-linear shunt compensators. Bus couplers become breakers between the
@@ -271,7 +271,7 @@ public final class BusToNodeBreakerConverter {
             copyHvdcLine(target, hvdc);
         }
 
-        // 5b. Tie lines - their two half (dangling) lines were recreated in the
+        // 5b. Tie lines - their two half (boundary) lines were recreated in the
         //     injection phase; here they are re-paired into the tie line.
         for (TieLine tl : source.getTieLines()) {
             copyTieLine(target, tl);
@@ -665,9 +665,9 @@ public final class BusToNodeBreakerConverter {
     }
 
     /**
-     * A tie line is a pair of boundary (dangling) lines joined at a boundary
-     * point. Both boundary lines were already recreated as feeder bays; this
-     * re-pairs them into the tie line by id.
+     * A tie line is a pair of boundary lines joined at a boundary point. Both
+     * boundary lines were already recreated as feeder bays; this re-pairs them
+     * into the tie line by id.
      */
     private static void copyTieLine(Network target, TieLine tl) {
         TieLineAdder adder = target.newTieLine()

@@ -12,7 +12,7 @@ import com.powsybl.iidm.network.*;
  * <p>Added on top of {@link IeeeCdfNetworkFactory#create14()}:
  * <ul>
  *   <li>a {@link Battery} (B10) and a {@link StaticVarCompensator} (B4);</li>
- *   <li>a {@link BoundaryLine} (B13, formerly "dangling line") and a non-linear
+ *   <li>a {@link BoundaryLine} (B13) and a non-linear
  *       {@link ShuntCompensator} (B14);</li>
  *   <li>a ratio tap changer on {@code T4-7-1} and a phase tap changer on
  *       {@code T4-9-1} (both parked at their neutral step, so the load flow is
@@ -23,7 +23,7 @@ import com.powsybl.iidm.network.*;
  *       reactive-power mode, so no voltage-control conflict);</li>
  *   <li>an LCC {@link HvdcLine} between B3 and B6 (stations sat next to the
  *       generators there for reactive support);</li>
- *   <li>a {@link TieLine} (two paired dangling lines) in parallel with the
+ *   <li>a {@link TieLine} (two paired boundary lines) in parallel with the
  *       B10-B11 line;</li>
  *   <li>a two-busbar voltage level joined by a closed bus coupler, fed from B1
  *       with a load reachable only through the coupler.</li>
@@ -44,7 +44,7 @@ public final class ExtendedIeee14Factory {
 
         addBattery(net);
         addStaticVarCompensator(net);
-        addDanglingLine(net);
+        addBoundaryLine(net);
         addNonLinearShunt(net);
         addRatioTapChanger(net);
         addPhaseTapChanger(net);
@@ -80,7 +80,7 @@ public final class ExtendedIeee14Factory {
                 .add();
     }
 
-    private static void addDanglingLine(Network net) {
+    private static void addBoundaryLine(Network net) {
         net.getVoltageLevel("VL13").newBoundaryLine()
                 .setId("DL1")
                 .setBus("B13").setConnectableBus("B13")

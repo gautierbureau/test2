@@ -112,7 +112,7 @@ result matches the original bus-for-bus.
 
 Supported equipment: generators (min/max or curve reactive limits), loads,
 batteries, static var compensators, boundary lines (the type powsybl 7.3
-renamed from "dangling line"), VSC and LCC converter stations (all reconnected
+renamed from `DanglingLine`), VSC and LCC converter stations (all reconnected
 as injection bays); lines, two- and three-winding
 transformers with their ratio/phase tap changers and current limits; HVDC
 lines; tie lines; linear/non-linear shunts; and bus couplers (mapped to
@@ -127,7 +127,7 @@ one of every supported extra type), or any bus-breaker `.xiidm`:
 java -cp target/curve-transporter-1.0.0-shaded.jar \
      com.example.transporter.ConvertToNodeBreaker \
      --ieee14 -o /tmp/ieee14_nb.xiidm --validate
-# --ieee14-extended : IEEE-14 + battery, SVC, dangling line, non-linear shunt,
+# --ieee14-extended : IEEE-14 + battery, SVC, boundary line, non-linear shunt,
 #                     ratio/phase tap changers, 3-winding transformer, VSC HVDC,
 #                     LCC HVDC, a tie line and a bus coupler
 # --input path/to/bus_breaker.xiidm -o out.xiidm --validate
