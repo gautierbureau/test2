@@ -124,8 +124,6 @@ that already carry limits).
 
 Handles lines, two- and three-winding transformers and boundary (dangling)
 lines; sides with no usable flow (disconnected / near-zero current) are skipped.
-Validated on IEEE-14/118/300 and on a real PEGASE-1354 case (3968 branch sides
-sized; base-case loading peaks at 80 % of the permanent limit, no overloads).
 
 ```
 cd python
@@ -135,6 +133,22 @@ python3 add_current_limits.py -i case1354pegase.mat -o out.xiidm --validate
 python3 add_current_limits.py -i case.xiidm --permanent-margin 1.3 \
         --tiers 1200:1.10,600:1.20,60:1.40 --group-name LOADFLOW_BASED -o out.xiidm
 ```
+
+There are **two implementations** of this feature: the Python module above and a
+Java port (`CurrentLimitsGenerator` + the `add-current-limits` CLI, see
+`java/README.md`). They produce identical side counts on every case tried.
+Validated on IEEE-14/118/300 and on the real PEGASE cases — base-case loading
+peaks at 80 % of the permanent limit with no overloads throughout:
+
+| network         | branch sides sized | skipped (no flow) |
+|-----------------|--------------------|-------------------|
+| case1354pegase  | 3 968              | 14                |
+| case9241pegase  | 31 632             | 466               |
+| case13659pegase | 39 798             | 1 136             |
+
+`case13659pegase` ships with no operational limits at all, so the tool builds
+the full set from scratch; `case9241pegase` needs the automatic DC-start
+fallback to converge.
 
 ## Method (per-unit, on HV side)
 
