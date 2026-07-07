@@ -6,6 +6,7 @@ import com.powsybl.iidm.network.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,7 +19,7 @@ import java.util.Map;
  * changed — so a load flow on the converted network yields the same bus
  * voltages and branch flows as on the original.
  *
- * <p>The rule is one busbar section per configured bus. Every piece of
+ * <p>By default each configured bus becomes one busbar section. Every piece of
  * equipment that used to sit directly on a bus-breaker bus is reconnected to
  * the corresponding busbar section through its own <i>feeder bay</i>: a
  * disconnector to the busbar plus a series breaker, created by powsybl's
@@ -26,6 +27,10 @@ import java.util.Map;
  * {@link CreateBranchFeederBaysBuilder} (branches). This mirrors how a real
  * node-breaker substation is drawn, where each feeder reaches the busbar
  * through switchgear rather than being wired straight onto the bus.
+ *
+ * <p>{@link #convert(Network, int)} can instead split each bus into several
+ * busbar sections joined by closed coupler breakers (a sectionalized busbar),
+ * distributing the feeders across them - see that method for details.
  *
  * <pre>
  *   bus-breaker              node-breaker (after conversion)
@@ -63,6 +68,75 @@ public final class BusToNodeBreakerConverter {
     }
 
     /**
+     * Tracks the busbar section(s) created for each configured bus and hands
+     * them out to feeders. Non-generator feeders are spread round-robin; each
+     * generator on a multi-generator bus is given its own section (up to the
+     * number of sections) so units stay independently switchable.
+     */
+    private static final class BusbarAssignment {
+
+        private final int minSectionsPerBus;
+        private final boolean oneBusbarPerGenerator;
+        private final Map<String, Integer> gensPerBus;
+        private final Map<String, List<String>> sections = new HashMap<>();
+        private final Map<String, Integer> feederCursor = new HashMap<>();
+        private final Map<String, Integer> generatorCursor = new HashMap<>();
+
+        BusbarAssignment(int minSectionsPerBus, boolean oneBusbarPerGenerator,
+                         Map<String, Integer> gensPerBus) {
+            this.minSectionsPerBus = minSectionsPerBus;
+            this.oneBusbarPerGenerator = oneBusbarPerGenerator;
+            this.gensPerBus = gensPerBus;
+        }
+
+        /** Number of busbar sections to create for a given bus. */
+        int sectionCountFor(String busId) {
+            int wanted = minSectionsPerBus;
+            if (oneBusbarPerGenerator) {
+                int gens = gensPerBus.getOrDefault(busId, 0);
+                if (gens > 1) {
+                    wanted = Math.max(wanted, gens);
+                }
+            }
+            return Math.max(1, wanted);
+        }
+
+        void register(String busId, String bbsId) {
+            sections.computeIfAbsent(busId, k -> new ArrayList<>()).add(bbsId);
+        }
+
+        private List<String> sectionsOf(String busId) {
+            List<String> list = sections.get(busId);
+            if (list == null || list.isEmpty()) {
+                throw new IllegalStateException("No busbar section created for bus " + busId);
+            }
+            return list;
+        }
+
+        /**
+         * Section a feeder attaches to. Generators walk their own cursor so each
+         * lands on a distinct section (while sections remain); everything else is
+         * round-robined independently.
+         */
+        String pick(String busId, boolean generatorFeeder) {
+            List<String> list = sectionsOf(busId);
+            Map<String, Integer> cursor = generatorFeeder ? generatorCursor : feederCursor;
+            int i = cursor.merge(busId, 1, Integer::sum) - 1;
+            return list.get(i % list.size());
+        }
+
+        /** First section of a bus (used for bus-coupler wiring). */
+        String first(String busId) {
+            return sectionsOf(busId).get(0);
+        }
+
+        /** Total number of busbar sections created across all buses. */
+        int total() {
+            return sections.values().stream().mapToInt(List::size).sum();
+        }
+    }
+
+    /**
      * Build and return the node-breaker equivalent of {@code source}.
      *
      * @param source a network whose voltage levels are all in
@@ -74,12 +148,68 @@ public final class BusToNodeBreakerConverter {
      *         the converter does not yet handle
      */
     public static Network convert(Network source) {
+        return convert(source, 1);
+    }
+
+    /**
+     * Convert with {@code busbarSectionsPerBus} busbar sections per bus, keeping
+     * the default policy of giving each generator its own busbar section on
+     * buses that host more than one.
+     */
+    public static Network convert(Network source, int busbarSectionsPerBus) {
+        return convert(source, busbarSectionsPerBus, true);
+    }
+
+    /**
+     * Build and return the node-breaker equivalent of {@code source}, splitting
+     * each configured bus into busbar sections.
+     *
+     * <p>Each bus is given at least {@code busbarSectionsPerBus} busbar sections.
+     * When {@code oneBusbarPerGenerator} is set and a bus hosts several
+     * generators, the section count is raised to at least the number of
+     * generators so each generator can sit on its own busbar - the usual
+     * practice for a multi-unit power station, where each unit must be
+     * independently switchable. The remaining feeders are spread round-robin
+     * across the sections.
+     *
+     * <p>Sections of the same bus are chained by <b>closed coupler breakers</b>
+     * (BBS_1 —[brk]— BBS_2 —[brk]— …), so they form one electrical node and the
+     * load flow is unchanged; opening a coupler later splits the substation
+     * exactly as it would in the field.
+     *
+     * @param source                a fully bus-breaker network
+     * @param busbarSectionsPerBus  minimum number of busbar sections per bus
+     *                              ({@code >= 1})
+     * @param oneBusbarPerGenerator when {@code true}, buses with more than one
+     *                              generator get one busbar section per generator
+     * @return a new, electrically identical, all node-breaker network
+     * @throws IllegalArgumentException if {@code busbarSectionsPerBus < 1}
+     */
+    public static Network convert(Network source, int busbarSectionsPerBus,
+                                  boolean oneBusbarPerGenerator) {
+        if (busbarSectionsPerBus < 1) {
+            throw new IllegalArgumentException(
+                    "busbarSectionsPerBus must be >= 1, got " + busbarSectionsPerBus);
+        }
         Network target = Network.create(source.getId(), source.getSourceFormat());
         target.setCaseDate(source.getCaseDate());
         target.setForecastDistance(source.getForecastDistance());
 
-        // Maps configured bus id -> busbar section id in the target network.
-        Map<String, String> busToBbs = new HashMap<>();
+        // Count generators per configured bus, to size busbars when the
+        // one-busbar-per-generator policy is active.
+        Map<String, Integer> gensPerBus = new HashMap<>();
+        if (oneBusbarPerGenerator) {
+            for (Generator g : source.getGenerators()) {
+                Bus b = g.getTerminal().getBusBreakerView().getConnectableBus();
+                if (b != null) {
+                    gensPerBus.merge(b.getId(), 1, Integer::sum);
+                }
+            }
+        }
+
+        // Configured bus id -> its busbar section(s) in the target network.
+        BusbarAssignment busToBbs =
+                new BusbarAssignment(busbarSectionsPerBus, oneBusbarPerGenerator, gensPerBus);
         // Next free ConnectablePosition order, per target voltage level id.
         Map<String, Integer> nextOrder = new HashMap<>();
 
@@ -162,7 +292,7 @@ public final class BusToNodeBreakerConverter {
         LOGGER.info("Converted '{}' to node-breaker: {} substation(s), {} voltage level(s), "
                         + "{} busbar section(s)",
                 target.getId(), target.getSubstationCount(), target.getVoltageLevelCount(),
-                busToBbs.size());
+                busToBbs.total());
         return target;
     }
 
@@ -208,18 +338,33 @@ public final class BusToNodeBreakerConverter {
         vlAdder.add();
     }
 
-    /** Create one busbar section per configured bus and record the mapping. */
+    /**
+     * Create {@code busbarSectionsPerBus} busbar sections per configured bus and
+     * record the mapping. When more than one section is requested, consecutive
+     * sections of the same bus are joined by a closed coupler breaker so they
+     * form one electrical node while being separable in the field.
+     */
     private static void createBusbarSections(Network target, VoltageLevel vl,
-                                             Map<String, String> busToBbs) {
+                                             BusbarAssignment busToBbs) {
         VoltageLevel tvl = target.getVoltageLevel(vl.getId());
+        VoltageLevel.NodeBreakerView nbv = tvl.getNodeBreakerView();
         int node = 0;
         for (Bus bus : vl.getBusBreakerView().getBuses()) {
-            String bbsId = bus.getId() + BBS_SUFFIX;
-            tvl.getNodeBreakerView().newBusbarSection()
-                    .setId(bbsId)
-                    .setNode(node++)
-                    .add();
-            busToBbs.put(bus.getId(), bbsId);
+            int perBus = busToBbs.sectionCountFor(bus.getId());
+            int prevNode = -1;
+            for (int k = 0; k < perBus; k++) {
+                int myNode = node++;
+                String bbsId = bus.getId() + BBS_SUFFIX + (perBus > 1 ? "_" + (k + 1) : "");
+                nbv.newBusbarSection().setId(bbsId).setNode(myNode).add();
+                busToBbs.register(bus.getId(), bbsId);
+                if (prevNode >= 0) {
+                    nbv.newBreaker()
+                            .setId(bus.getId() + "_COUPLER_" + k)
+                            .setNode1(prevNode).setNode2(myNode)
+                            .setOpen(false).add();
+                }
+                prevNode = myNode;
+            }
         }
     }
 
@@ -228,14 +373,14 @@ public final class BusToNodeBreakerConverter {
      * directly between the two busbar sections of the buses it used to join.
      */
     private static void copyBusCouplers(Network target, VoltageLevel vl,
-                                        Map<String, String> busToBbs) {
+                                        BusbarAssignment busToBbs) {
         VoltageLevel tvl = target.getVoltageLevel(vl.getId());
         VoltageLevel.NodeBreakerView nbv = tvl.getNodeBreakerView();
         for (Switch sw : vl.getBusBreakerView().getSwitches()) {
             Bus b1 = vl.getBusBreakerView().getBus1(sw.getId());
             Bus b2 = vl.getBusBreakerView().getBus2(sw.getId());
-            int n1 = nbv.getBusbarSection(busToBbs.get(b1.getId())).getTerminal().getNodeBreakerView().getNode();
-            int n2 = nbv.getBusbarSection(busToBbs.get(b2.getId())).getTerminal().getNodeBreakerView().getNode();
+            int n1 = nbv.getBusbarSection(busToBbs.first(b1.getId())).getTerminal().getNodeBreakerView().getNode();
+            int n2 = nbv.getBusbarSection(busToBbs.first(b2.getId())).getTerminal().getNodeBreakerView().getNode();
             nbv.newBreaker()
                     .setId(sw.getId())
                     .setNode1(n1)
@@ -251,7 +396,7 @@ public final class BusToNodeBreakerConverter {
     // ------------------------------------------------------------------
 
     private static void copyGenerator(Network target, Generator g,
-                                      Map<String, String> busToBbs,
+                                      BusbarAssignment busToBbs,
                                       Map<String, Integer> nextOrder) {
         VoltageLevel tvl = target.getVoltageLevel(g.getTerminal().getVoltageLevel().getId());
         GeneratorAdder adder = tvl.newGenerator()
@@ -266,14 +411,14 @@ public final class BusToNodeBreakerConverter {
                 .setRatedS(g.getRatedS());
         g.getOptionalName().ifPresent(adder::setName);
 
-        createInjectionBay(target, adder, feederBus(g.getTerminal()), busToBbs, nextOrder);
+        createInjectionBay(target, adder, feederBus(g.getTerminal()), busToBbs, nextOrder, true);
 
         Generator created = target.getGenerator(g.getId());
         copyReactiveLimits(g, created);
     }
 
     private static void copyLoad(Network target, Load l,
-                                 Map<String, String> busToBbs,
+                                 BusbarAssignment busToBbs,
                                  Map<String, Integer> nextOrder) {
         VoltageLevel tvl = target.getVoltageLevel(l.getTerminal().getVoltageLevel().getId());
         LoadAdder adder = tvl.newLoad()
@@ -287,7 +432,7 @@ public final class BusToNodeBreakerConverter {
     }
 
     private static void copyShunt(Network target, ShuntCompensator sh,
-                                  Map<String, String> busToBbs,
+                                  BusbarAssignment busToBbs,
                                   Map<String, Integer> nextOrder) {
         VoltageLevel tvl = target.getVoltageLevel(sh.getTerminal().getVoltageLevel().getId());
         ShuntCompensatorAdder adder = tvl.newShuntCompensator()
@@ -326,7 +471,7 @@ public final class BusToNodeBreakerConverter {
     }
 
     private static void copyBattery(Network target, Battery b,
-                                    Map<String, String> busToBbs,
+                                    BusbarAssignment busToBbs,
                                     Map<String, Integer> nextOrder) {
         VoltageLevel tvl = target.getVoltageLevel(b.getTerminal().getVoltageLevel().getId());
         BatteryAdder adder = tvl.newBattery()
@@ -342,7 +487,7 @@ public final class BusToNodeBreakerConverter {
     }
 
     private static void copyStaticVarCompensator(Network target, StaticVarCompensator svc,
-                                                 Map<String, String> busToBbs,
+                                                 BusbarAssignment busToBbs,
                                                  Map<String, Integer> nextOrder) {
         VoltageLevel tvl = target.getVoltageLevel(svc.getTerminal().getVoltageLevel().getId());
         StaticVarCompensatorAdder adder = tvl.newStaticVarCompensator()
@@ -361,7 +506,7 @@ public final class BusToNodeBreakerConverter {
     }
 
     private static void copyBoundaryLine(Network target, BoundaryLine dl,
-                                         Map<String, String> busToBbs,
+                                         BusbarAssignment busToBbs,
                                          Map<String, Integer> nextOrder) {
         VoltageLevel tvl = target.getVoltageLevel(dl.getTerminal().getVoltageLevel().getId());
         BoundaryLineAdder adder = tvl.newBoundaryLine()
@@ -381,7 +526,7 @@ public final class BusToNodeBreakerConverter {
     }
 
     private static void copyVscConverterStation(Network target, VscConverterStation vsc,
-                                                Map<String, String> busToBbs,
+                                                BusbarAssignment busToBbs,
                                                 Map<String, Integer> nextOrder) {
         VoltageLevel tvl = target.getVoltageLevel(vsc.getTerminal().getVoltageLevel().getId());
         VscConverterStationAdder adder = tvl.newVscConverterStation()
@@ -397,7 +542,7 @@ public final class BusToNodeBreakerConverter {
     }
 
     private static void copyLccConverterStation(Network target, LccConverterStation lcc,
-                                                Map<String, String> busToBbs,
+                                                BusbarAssignment busToBbs,
                                                 Map<String, Integer> nextOrder) {
         VoltageLevel tvl = target.getVoltageLevel(lcc.getTerminal().getVoltageLevel().getId());
         LccConverterStationAdder adder = tvl.newLccConverterStation()
@@ -414,7 +559,7 @@ public final class BusToNodeBreakerConverter {
     // ------------------------------------------------------------------
 
     private static void copyLine(Network target, Line line,
-                                 Map<String, String> busToBbs,
+                                 BusbarAssignment busToBbs,
                                  Map<String, Integer> nextOrder) {
         LineAdder adder = target.newLine()
                 .setId(line.getId())
@@ -436,7 +581,7 @@ public final class BusToNodeBreakerConverter {
     }
 
     private static void copyTwoWindingsTransformer(Network target, TwoWindingsTransformer tx,
-                                                   Map<String, String> busToBbs,
+                                                   BusbarAssignment busToBbs,
                                                    Map<String, Integer> nextOrder) {
         Substation ts = tx.getSubstation()
                 .map(s -> target.getSubstation(s.getId()))
@@ -470,7 +615,7 @@ public final class BusToNodeBreakerConverter {
      * node, then a breaker to the node the leg terminal sits on.
      */
     private static void copyThreeWindingsTransformer(Network target, ThreeWindingsTransformer t3,
-                                                     Map<String, String> busToBbs) {
+                                                     BusbarAssignment busToBbs) {
         Substation ts = t3.getSubstation()
                 .map(s -> target.getSubstation(s.getId()))
                 .orElseThrow(() -> new IllegalStateException(
@@ -630,9 +775,16 @@ public final class BusToNodeBreakerConverter {
     // ------------------------------------------------------------------
 
     private static void createInjectionBay(Network target, InjectionAdder<?, ?> adder,
-                                           String busId, Map<String, String> busToBbs,
+                                           String busId, BusbarAssignment busToBbs,
                                            Map<String, Integer> nextOrder) {
-        String bbsId = requireBbs(busId, busToBbs);
+        createInjectionBay(target, adder, busId, busToBbs, nextOrder, false);
+    }
+
+    private static void createInjectionBay(Network target, InjectionAdder<?, ?> adder,
+                                           String busId, BusbarAssignment busToBbs,
+                                           Map<String, Integer> nextOrder,
+                                           boolean generatorFeeder) {
+        String bbsId = busToBbs.pick(busId, generatorFeeder);
         String vlId = target.getBusbarSection(bbsId).getTerminal().getVoltageLevel().getId();
         new CreateFeederBayBuilder()
                 .withInjectionAdder(adder)
@@ -645,7 +797,7 @@ public final class BusToNodeBreakerConverter {
 
     private static void createBranchBays(Network target, BranchAdder<?, ?> adder,
                                          String bus1Id, String bus2Id,
-                                         Map<String, String> busToBbs,
+                                         BusbarAssignment busToBbs,
                                          Map<String, Integer> nextOrder) {
         String bbs1 = requireBbs(bus1Id, busToBbs);
         String bbs2 = requireBbs(bus2Id, busToBbs);
@@ -703,12 +855,9 @@ public final class BusToNodeBreakerConverter {
         return bus.getId();
     }
 
-    private static String requireBbs(String busId, Map<String, String> busToBbs) {
-        String bbsId = busToBbs.get(busId);
-        if (bbsId == null) {
-            throw new IllegalStateException("No busbar section created for bus " + busId);
-        }
-        return bbsId;
+    /** Pick the busbar section a new (non-generator) feeder on {@code busId} attaches to. */
+    private static String requireBbs(String busId, BusbarAssignment busToBbs) {
+        return busToBbs.pick(busId, false);
     }
 
     private static int busbarNode(Network target, String bbsId) {

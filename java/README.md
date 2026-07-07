@@ -133,6 +133,22 @@ java -cp target/curve-transporter-1.0.0-shaded.jar \
 # --input path/to/bus_breaker.xiidm -o out.xiidm --validate
 ```
 
+### Busbar layout options
+
+By default each bus becomes a single busbar section — except that on a bus
+hosting **more than one generator**, each generator is given its own busbar
+section (the usual layout for a multi-unit power station, where every unit must
+be independently switchable). The sections of a bus are chained by *closed*
+coupler breakers, so they stay one electrical node until a coupler is opened.
+
+- `--busbars-per-bus N` — give every bus at least `N` busbar sections (a
+  sectionalized single busbar). Feeders are spread round-robin across them.
+- `--no-generator-busbars` — disable the one-busbar-per-generator policy, so a
+  multi-unit bus collapses to `N` sections like any other.
+
+The same is available programmatically:
+`BusToNodeBreakerConverter.convert(network, busbarSectionsPerBus, oneBusbarPerGenerator)`.
+
 `--validate` runs an AC load flow on both networks and reports the maximum bus
 voltage/angle deviation (≈1e-4 kV / 1e-4 deg on IEEE-14; ≈1e-3 kV / 1e-2 deg on
 the extended network, where the SVC control loop adds a little solver noise). It
