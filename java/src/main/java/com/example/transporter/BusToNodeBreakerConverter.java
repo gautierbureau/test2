@@ -43,13 +43,13 @@ import java.util.Map;
  * rebuilt rather than mutated in place.
  *
  * <p>Supported equipment: generators, loads, batteries, static var
- * compensators, dangling lines and VSC converter stations (all reconnected as
- * injection bays); lines, two- and three-winding transformers with their
- * ratio/phase tap changers and current limits; HVDC lines; linear and
- * non-linear shunt compensators. Bus couplers become breakers between the two
- * busbar sections they join. Element types not yet handled (LCC converter
- * stations, tie lines) raise a clear {@link UnsupportedOperationException} so
- * an unsupported input never fails silently.
+ * compensators, dangling lines, VSC and LCC converter stations (all reconnected
+ * as injection bays); lines, two- and three-winding transformers with their
+ * ratio/phase tap changers and current limits; HVDC lines; tie lines; linear
+ * and non-linear shunt compensators. Bus couplers become breakers between the
+ * two busbar sections they join. The one remaining unhandled connectable type,
+ * {@link Ground}, raises a clear {@link UnsupportedOperationException} so an
+ * unsupported input never fails silently.
  */
 public final class BusToNodeBreakerConverter {
 
@@ -121,6 +121,9 @@ public final class BusToNodeBreakerConverter {
         for (VscConverterStation vsc : source.getVscConverterStations()) {
             copyVscConverterStation(target, vsc, busToBbs, nextOrder);
         }
+        for (LccConverterStation lcc : source.getLccConverterStations()) {
+            copyLccConverterStation(target, lcc, busToBbs, nextOrder);
+        }
 
         // 4. Branches (two- and three-winding transformers, lines).
         for (Line line : source.getLines()) {
@@ -136,6 +139,12 @@ public final class BusToNodeBreakerConverter {
         // 5. HVDC lines - both converter stations now exist as injections.
         for (HvdcLine hvdc : source.getHvdcLines()) {
             copyHvdcLine(target, hvdc);
+        }
+
+        // 5b. Tie lines - their two half (dangling) lines were recreated in the
+        //     injection phase; here they are re-paired into the tie line.
+        for (TieLine tl : source.getTieLines()) {
+            copyTieLine(target, tl);
         }
 
         // 6. Tap changers - copied once every terminal exists so a tap changer
@@ -387,6 +396,19 @@ public final class BusToNodeBreakerConverter {
         copyReactiveLimits(vsc, target.getVscConverterStation(vsc.getId()));
     }
 
+    private static void copyLccConverterStation(Network target, LccConverterStation lcc,
+                                                Map<String, String> busToBbs,
+                                                Map<String, Integer> nextOrder) {
+        VoltageLevel tvl = target.getVoltageLevel(lcc.getTerminal().getVoltageLevel().getId());
+        LccConverterStationAdder adder = tvl.newLccConverterStation()
+                .setId(lcc.getId())
+                .setLossFactor(lcc.getLossFactor())
+                .setPowerFactor(lcc.getPowerFactor());
+        lcc.getOptionalName().ifPresent(adder::setName);
+
+        createInjectionBay(target, adder, feederBus(lcc.getTerminal()), busToBbs, nextOrder);
+    }
+
     // ------------------------------------------------------------------
     // Branches
     // ------------------------------------------------------------------
@@ -495,6 +517,20 @@ public final class BusToNodeBreakerConverter {
             ThreeWindingsTransformer.Leg dstLeg = created.getLeg(ThreeSides.valueOf(s));
             srcLeg.getCurrentLimits().ifPresent(cl -> copyCurrentLimits(cl, dstLeg.newCurrentLimits()));
         }
+    }
+
+    /**
+     * A tie line is a pair of dangling lines joined at a boundary point. Both
+     * dangling lines were already recreated as feeder bays; this re-pairs them
+     * into the tie line by id.
+     */
+    private static void copyTieLine(Network target, TieLine tl) {
+        TieLineAdder adder = target.newTieLine()
+                .setId(tl.getId())
+                .setDanglingLine1(tl.getDanglingLine1().getId())
+                .setDanglingLine2(tl.getDanglingLine2().getId());
+        tl.getOptionalName().ifPresent(adder::setName);
+        adder.add();
     }
 
     private static void copyHvdcLine(Network target, HvdcLine hvdc) {
@@ -729,16 +765,9 @@ public final class BusToNodeBreakerConverter {
 
     /** Fail fast on equipment types the converter does not reproduce yet. */
     private static void rejectUnsupported(Network source) {
-        long lccCount = source.getHvdcConverterStationStream()
-                .filter(s -> s.getHvdcType() == HvdcConverterStation.HvdcType.LCC)
-                .count();
-        if (lccCount > 0) {
+        if (source.getGroundCount() > 0) {
             throw new UnsupportedOperationException(
-                    "LCC converter stations are not supported yet (" + lccCount + " found).");
-        }
-        if (source.getTieLineCount() > 0) {
-            throw new UnsupportedOperationException(
-                    "Tie lines are not supported yet (" + source.getTieLineCount() + " found).");
+                    "Grounds are not supported yet (" + source.getGroundCount() + " found).");
         }
     }
 }
