@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -47,14 +48,26 @@ DEFAULT_PERMANENT_MARGIN = 1.25
 DEFAULT_GROUP_NAME = "LOADFLOW_BASED"
 PERMANENT_DURATION = -1
 
-# Which branch element types carry per-side current, and how to reach it.
-# name -> (getter, [(current_column, iidm_side, selected_group_column)], updater)
+# Per-side wiring for each branch type: (current_column, iidm_side, selected_group_column).
 _LINE_SIDES = [("i1", "ONE", "selected_limits_group_1"),
                ("i2", "TWO", "selected_limits_group_2")]
 _T3_SIDES = [("i1", "ONE", "selected_limits_group_1"),
              ("i2", "TWO", "selected_limits_group_2"),
              ("i3", "THREE", "selected_limits_group_3")]
 _BOUNDARY_SIDES = [("i", "NONE", "selected_limits_group")]
+
+# The single source of truth for which branch types get limits and how to reach
+# them: (type_name, getter, sides, updater, include_flag). ``include_flag`` names
+# the ``include_*`` toggle that gates the type (None = always included).
+_BRANCH_TYPES = (
+    ("line", "get_lines", _LINE_SIDES, "update_lines", None),
+    ("2_windings_transformer", "get_2_windings_transformers", _LINE_SIDES,
+     "update_2_windings_transformers", "transformers"),
+    ("3_windings_transformer", "get_3_windings_transformers", _T3_SIDES,
+     "update_3_windings_transformers", "transformers"),
+    ("boundary_line", "get_boundary_lines", _BOUNDARY_SIDES,
+     "update_boundary_lines", "boundary_lines"),
+)
 
 
 def add_current_limits(
@@ -121,27 +134,21 @@ def add_current_limits(
         "by_type": {},
     }
     rows: List[dict] = []
+    # updater -> {selected_group_column -> [ids that got a limit on that side]}.
     selections: Dict[str, Dict[str, List[str]]] = {}
 
-    specs = [("line", network.get_lines, _LINE_SIDES, "update_lines")]
-    if include_transformers:
-        specs.append(("2_windings_transformer",
-                      network.get_2_windings_transformers, _LINE_SIDES,
-                      "update_2_windings_transformers"))
-        specs.append(("3_windings_transformer",
-                      network.get_3_windings_transformers, _T3_SIDES,
-                      "update_3_windings_transformers"))
-    if include_boundary_lines:
-        specs.append(("boundary_line", network.get_boundary_lines,
-                      _BOUNDARY_SIDES, "update_boundary_lines"))
+    includes = {"transformers": include_transformers,
+                "boundary_lines": include_boundary_lines}
 
-    for type_name, getter, sides, updater in specs:
-        df = getter()
+    for type_name, getter_name, sides, updater, flag in _BRANCH_TYPES:
+        if flag is not None and not includes[flag]:
+            continue
+        df = getattr(network, getter_name)()
         if df.empty:
             continue
         type_stats = {"branches": 0, "sides": 0, "skipped_no_flow": 0,
                       "skipped_existing": 0}
-        sel_cols: Dict[str, List[str]] = {"id": []}
+        sel_by_col: Dict[str, List[str]] = defaultdict(list)
         for eid, elem in df.iterrows():
             if eid in skip:
                 type_stats["skipped_existing"] += 1
@@ -162,26 +169,25 @@ def add_current_limits(
                 stats["permanent_limits"] += 1
                 stats["temporary_limits"] += len(temporary_tiers)
                 element_had_side = True
+                # Select the group only on the side that actually got a limit -
+                # pointing a side at a group with no limit there is rejected.
+                sel_by_col[group_col].append(eid)
             if element_had_side:
                 type_stats["branches"] += 1
                 stats["branches"] += 1
-                # Select the group on every side of the branch (it applies
-                # element-wide even where a side carried no flow).
-                sel_cols["id"].append(eid)
-                for _, _, group_col in sides:
-                    sel_cols.setdefault(group_col, [])
-                    sel_cols[group_col].append(group_name)
         if type_stats["branches"] or type_stats["skipped_no_flow"] \
                 or type_stats["skipped_existing"]:
             stats["by_type"][type_name] = type_stats
-        if sel_cols["id"]:
-            selections[updater] = sel_cols
+        if sel_by_col:
+            selections[updater] = dict(sel_by_col)
 
     if rows:
         network.create_operational_limits(pd.DataFrame(rows).set_index("element_id"))
     if select:
-        for updater, sel_cols in selections.items():
-            getattr(network, updater)(**sel_cols)
+        for updater, sel_by_col in selections.items():
+            for group_col, ids in sel_by_col.items():
+                getattr(network, updater)(
+                    id=ids, **{group_col: [group_name] * len(ids)})
 
     return stats
 
@@ -229,15 +235,16 @@ def _is_usable(current: float, min_current: float) -> bool:
 def _run_ac_or_raise(network: pn.Network,
                      lf_parameters: Optional[lf.Parameters]) -> None:
     if lf_parameters is not None:
-        result = lf.run_ac(network, lf_parameters)
-        if result[0].status.name != "CONVERGED":
-            raise RuntimeError(f"load flow did not converge: {result[0].status.name}")
-        return
-    # No parameters given: try a flat start, then a DC-based start for hard
-    # cases (e.g. case9241pegase), mirroring bus_to_node_breaker.validate().
-    for init in (lf.VoltageInitMode.UNIFORM_VALUES, lf.VoltageInitMode.DC_VALUES):
-        params = lf.Parameters(distributed_slack=True, use_reactive_limits=True,
-                               voltage_init_mode=init)
+        candidates = [lf_parameters]
+    else:
+        # No parameters given: try a flat start, then a DC-based start, which
+        # converges large cases where a flat start does not.
+        candidates = [
+            lf.Parameters(distributed_slack=True, use_reactive_limits=True,
+                          voltage_init_mode=init)
+            for init in (lf.VoltageInitMode.UNIFORM_VALUES, lf.VoltageInitMode.DC_VALUES)
+        ]
+    for params in candidates:
         result = lf.run_ac(network, params)
         if result[0].status.name == "CONVERGED":
             return
@@ -297,11 +304,8 @@ def loading_report(network: pn.Network, group_name: str = DEFAULT_GROUP_NAME,
 
 def _side_currents(network: pn.Network) -> Dict[Tuple[str, str], float]:
     out: Dict[Tuple[str, str], float] = {}
-    for getter, sides in ((network.get_lines, _LINE_SIDES),
-                          (network.get_2_windings_transformers, _LINE_SIDES),
-                          (network.get_3_windings_transformers, _T3_SIDES),
-                          (network.get_boundary_lines, _BOUNDARY_SIDES)):
-        df = getter()
+    for _type_name, getter_name, sides, _updater, _flag in _BRANCH_TYPES:
+        df = getattr(network, getter_name)()
         if df.empty:
             continue
         for eid, elem in df.iterrows():
@@ -316,8 +320,9 @@ def _side_currents(network: pn.Network) -> Dict[Tuple[str, str], float]:
 
 def _validate_config(permanent_margin: float,
                      temporary_tiers: Sequence[Tuple[int, float]]) -> None:
-    if not permanent_margin > 0:
-        raise ValueError("permanent_margin must be positive")
+    if not permanent_margin > 1.0:
+        raise ValueError("permanent_margin must be > 1 (the permanent limit "
+                         "must sit above the base-case current)")
     seen = set()
     for duration, margin in temporary_tiers:
         if duration <= 0:
