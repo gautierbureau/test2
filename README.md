@@ -30,7 +30,34 @@ capability curve transported analytically through the transformer pi-model.
        -o /tmp/equivalent.xiidm --validate
   ```
 
-## Bus-breaker → node-breaker conversion (Java, new)
+## Bus-breaker → node-breaker conversion
+
+There are two implementations of a **bus-breaker to node-breaker converter**:
+one in Java (`java/`, the reference) and a pypowsybl port in Python
+(`python/bus_to_node_breaker.py`). Both build an electrically identical
+node-breaker network — one busbar section per configured bus, every feeder
+reconnected through a disconnector + breaker bay — and validate it with an AC
+load flow.
+
+### Python (pypowsybl)
+
+`convert(network, busbar_sections_per_bus=1, one_busbar_per_generator=True)`
+rebuilds the network with pypowsybl's `create_*_bay` / `create_coupling_device`
+helpers. It supports generators (with reactive limits), loads, linear/non-linear
+shunts, lines and two-winding transformers (with ratio/phase tap changers) — the
+types present in the IEEE and PEGASE cases — plus the `--busbars-per-bus` and
+one-busbar-per-generator options. Validated bus-for-bus on IEEE-14/118/300 and
+on PEGASE 1354/2869/9241 (the last needs a DC-start fallback, applied
+automatically by `validate()`).
+
+```
+cd python
+pip install -r requirements.txt
+python3 bus_to_node_breaker.py --builtin ieee300 --validate
+python3 bus_to_node_breaker.py --input case2869pegase.xiidm -o out.xiidm --validate
+```
+
+### Java
 
 `java/` also contains a **bus-breaker to node-breaker converter**
 (`BusToNodeBreakerConverter`). Given a bus-breaker network it builds an
