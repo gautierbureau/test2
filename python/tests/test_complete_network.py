@@ -61,6 +61,15 @@ def test_reactive_sizing_power_factor_fallback():
     assert q == pytest.approx(expected)
 
 
+def test_reactive_unity_power_factor_leaves_unsized():
+    net = pn.create_ieee14()  # no rated_s -> power-factor branch
+    stats = add_reactive_limits(net, power_factor=1.0, only_missing=False)
+    # Unity power factor means zero reactive band; leave those generators unsized
+    # rather than write a degenerate [0, 0] limit.
+    assert stats["filled"] == 0
+    assert stats["skipped_no_size"] == stats["generators"]
+
+
 def test_reactive_rejects_bad_power_factor():
     net = pn.create_ieee14()
     with pytest.raises(ValueError):

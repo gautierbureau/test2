@@ -137,7 +137,10 @@ public final class NetworkCompleter {
             }
         }
         if (Double.isFinite(p) && p != 0) {
-            return Math.abs(p) * Math.tan(Math.acos(powerFactor));
+            double q = Math.abs(p) * Math.tan(Math.acos(powerFactor));
+            if (q > 0) {  // unity power factor gives no reactive band -> leave unsized
+                return q;
+            }
         }
         return Double.NaN;
     }
@@ -216,11 +219,11 @@ public final class NetworkCompleter {
                 double rho = 1.0 + (k - neutral) * cfg.stepIncrement();
                 adder.beginStep().setRho(rho).setR(0).setX(0).setG(0).setB(0).endStep();
             }
-            if (cfg.regulating()) {
-                adder.setRegulationMode(RatioTapChanger.RegulationMode.VOLTAGE)
-                        .setTargetV(targetV)
-                        .setRegulating(true);
-            }
+            // Always store the base-case setpoint so a later flip to regulating
+            // has a valid target (matches the Python module).
+            adder.setRegulationMode(RatioTapChanger.RegulationMode.VOLTAGE)
+                    .setTargetV(targetV)
+                    .setRegulating(cfg.regulating());
             adder.add();
             added++;
         }
