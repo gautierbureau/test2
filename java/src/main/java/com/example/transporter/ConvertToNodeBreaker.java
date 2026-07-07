@@ -143,17 +143,37 @@ public class ConvertToNodeBreaker implements Callable<Integer> {
      * choice.
      */
     private boolean validate(Network source, Network target) {
-        LoadFlowParameters params = new LoadFlowParameters()
-                .setUseReactiveLimits(true)
-                .setTransformerVoltageControlOn(false)
-                .setDistributedSlack(true);
-        LoadFlowResult srcLf = LoadFlow.run(source, params);
-        LoadFlowResult tgtLf = LoadFlow.run(target, params);
-
         System.out.println();
         System.out.println("=".repeat(64));
         System.out.println("Validation load flow (source vs. converted)");
         System.out.println("=".repeat(64));
+
+        // A flat (uniform) start can fail to converge on very large networks -
+        // and the node-breaker graph can trip it where the bus-breaker one did
+        // not (different slack pick / ordering). Fall back to a DC-based start,
+        // which is far more robust on cases like case9241pegase.
+        LoadFlowParameters.VoltageInitMode[] inits = {
+                LoadFlowParameters.VoltageInitMode.UNIFORM_VALUES,
+                LoadFlowParameters.VoltageInitMode.DC_VALUES
+        };
+        LoadFlowResult srcLf = null;
+        LoadFlowResult tgtLf = null;
+        LoadFlowParameters.VoltageInitMode usedInit = null;
+        for (LoadFlowParameters.VoltageInitMode init : inits) {
+            LoadFlowParameters params = new LoadFlowParameters()
+                    .setUseReactiveLimits(true)
+                    .setTransformerVoltageControlOn(false)
+                    .setDistributedSlack(true)
+                    .setVoltageInitMode(init);
+            srcLf = LoadFlow.run(source, params);
+            tgtLf = LoadFlow.run(target, params);
+            usedInit = init;
+            if (srcLf.isFullyConverged() && tgtLf.isFullyConverged()) {
+                break;
+            }
+        }
+
+        System.out.printf("Init mode : %s%n", usedInit);
         System.out.printf("Source    : %s%n", srcLf.isFullyConverged() ? "CONVERGED" : "NOT CONVERGED");
         System.out.printf("Converted : %s%n", tgtLf.isFullyConverged() ? "CONVERGED" : "NOT CONVERGED");
         if (!srcLf.isFullyConverged() || !tgtLf.isFullyConverged()) {

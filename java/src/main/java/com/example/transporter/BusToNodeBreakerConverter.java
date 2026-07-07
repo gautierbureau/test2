@@ -115,8 +115,8 @@ public final class BusToNodeBreakerConverter {
         for (StaticVarCompensator svc : source.getStaticVarCompensators()) {
             copyStaticVarCompensator(target, svc, busToBbs, nextOrder);
         }
-        for (DanglingLine dl : source.getDanglingLines()) {
-            copyDanglingLine(target, dl, busToBbs, nextOrder);
+        for (BoundaryLine dl : source.getBoundaryLines()) {
+            copyBoundaryLine(target, dl, busToBbs, nextOrder);
         }
         for (VscConverterStation vsc : source.getVscConverterStations()) {
             copyVscConverterStation(target, vsc, busToBbs, nextOrder);
@@ -360,11 +360,11 @@ public final class BusToNodeBreakerConverter {
         createInjectionBay(target, adder, feederBus(svc.getTerminal()), busToBbs, nextOrder);
     }
 
-    private static void copyDanglingLine(Network target, DanglingLine dl,
+    private static void copyBoundaryLine(Network target, BoundaryLine dl,
                                          Map<String, String> busToBbs,
                                          Map<String, Integer> nextOrder) {
         VoltageLevel tvl = target.getVoltageLevel(dl.getTerminal().getVoltageLevel().getId());
-        DanglingLineAdder adder = tvl.newDanglingLine()
+        BoundaryLineAdder adder = tvl.newBoundaryLine()
                 .setId(dl.getId())
                 .setP0(dl.getP0())
                 .setQ0(dl.getQ0())
@@ -520,15 +520,15 @@ public final class BusToNodeBreakerConverter {
     }
 
     /**
-     * A tie line is a pair of dangling lines joined at a boundary point. Both
-     * dangling lines were already recreated as feeder bays; this re-pairs them
-     * into the tie line by id.
+     * A tie line is a pair of boundary (dangling) lines joined at a boundary
+     * point. Both boundary lines were already recreated as feeder bays; this
+     * re-pairs them into the tie line by id.
      */
     private static void copyTieLine(Network target, TieLine tl) {
         TieLineAdder adder = target.newTieLine()
                 .setId(tl.getId())
-                .setDanglingLine1(tl.getDanglingLine1().getId())
-                .setDanglingLine2(tl.getDanglingLine2().getId());
+                .setBoundaryLine1(tl.getBoundaryLine1().getId())
+                .setBoundaryLine2(tl.getBoundaryLine2().getId());
         tl.getOptionalName().ifPresent(adder::setName);
         adder.add();
     }

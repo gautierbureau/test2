@@ -12,8 +12,8 @@ import com.powsybl.iidm.network.*;
  * <p>Added on top of {@link IeeeCdfNetworkFactory#create14()}:
  * <ul>
  *   <li>a {@link Battery} (B10) and a {@link StaticVarCompensator} (B4);</li>
- *   <li>a {@link DanglingLine} (B13) and a non-linear {@link ShuntCompensator}
- *       (B14);</li>
+ *   <li>a {@link BoundaryLine} (B13, formerly "dangling line") and a non-linear
+ *       {@link ShuntCompensator} (B14);</li>
  *   <li>a ratio tap changer on {@code T4-7-1} and a phase tap changer on
  *       {@code T4-9-1} (both parked at their neutral step, so the load flow is
  *       unchanged);</li>
@@ -81,7 +81,7 @@ public final class ExtendedIeee14Factory {
     }
 
     private static void addDanglingLine(Network net) {
-        net.getVoltageLevel("VL13").newDanglingLine()
+        net.getVoltageLevel("VL13").newBoundaryLine()
                 .setId("DL1")
                 .setBus("B13").setConnectableBus("B13")
                 .setP0(3.0).setQ0(1.0)
@@ -221,14 +221,14 @@ public final class ExtendedIeee14Factory {
     private static void addTieLine(Network net) {
         // Two paired half-lines joined at boundary key XN_10_11, forming a tie
         // line in parallel with the existing B10-B11 line.
-        net.getVoltageLevel("VL10").newDanglingLine()
+        net.getVoltageLevel("VL10").newBoundaryLine()
                 .setId("DLT_A")
                 .setBus("B10").setConnectableBus("B10")
                 .setP0(0.0).setQ0(0.0)
                 .setR(0.1).setX(0.4).setG(0.0).setB(0.0)
                 .setPairingKey("XN_10_11")
                 .add();
-        net.getVoltageLevel("VL11").newDanglingLine()
+        net.getVoltageLevel("VL11").newBoundaryLine()
                 .setId("DLT_B")
                 .setBus("B11").setConnectableBus("B11")
                 .setP0(0.0).setQ0(0.0)
@@ -237,8 +237,8 @@ public final class ExtendedIeee14Factory {
                 .add();
         net.newTieLine()
                 .setId("TIE1")
-                .setDanglingLine1("DLT_A")
-                .setDanglingLine2("DLT_B")
+                .setBoundaryLine1("DLT_A")
+                .setBoundaryLine2("DLT_B")
                 .add();
     }
 
