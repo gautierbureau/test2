@@ -91,16 +91,48 @@ java -jar target/curve-transporter-1.0.0-shaded.jar --help
 curve-transporter/
 ├── pom.xml
 └── src/main/java/com/example/transporter/
-    ├── TransformerTransport.java   per-unit transport math + orientation
-    ├── CurveTransporter.java       sweep across the original P range
-    ├── EquivalentBuilder.java      mutate the network in place
-    └── Main.java                   picocli CLI entry point
+    ├── TransformerTransport.java       per-unit transport math + orientation
+    ├── CurveTransporter.java           sweep across the original P range
+    ├── EquivalentBuilder.java          mutate the network in place
+    ├── Main.java                       picocli CLI entry point
+    ├── BusToNodeBreakerConverter.java  bus-breaker → node-breaker converter
+    └── ConvertToNodeBreaker.java       picocli CLI for the converter
 ```
+
+## Bus-breaker → node-breaker conversion
+
+`BusToNodeBreakerConverter.convert(Network)` rebuilds a bus-breaker network as
+an electrically identical **node-breaker** network. For every configured bus it
+creates one busbar section, and every feeder that used to sit on that bus is
+reconnected through its own bay — a disconnector to the busbar plus a series
+breaker — using powsybl's `CreateFeederBay` / `CreateBranchFeederBays`
+modifications. The transformation is purely topological, so a load flow on the
+result matches the original bus-for-bus.
+
+Supported equipment (covers the IEEE-14 scoping network): generators (min/max
+or curve reactive limits), loads, linear/non-linear shunts, lines and
+two-winding transformers with their current limits, and bus couplers (mapped to
+breakers between busbars). Three-winding transformers, HVDC, SVCs, dangling
+lines, batteries and tie lines raise a clear `UnsupportedOperationException`
+rather than failing silently.
+
+Run it on the bundled IEEE-14 network (or any bus-breaker `.xiidm`):
+
+```bash
+java -cp target/curve-transporter-1.0.0-shaded.jar \
+     com.example.transporter.ConvertToNodeBreaker \
+     --ieee14 -o /tmp/ieee14_nb.xiidm --validate
+# or: --input path/to/bus_breaker.xiidm -o out.xiidm --validate
+```
+
+`--validate` runs an AC load flow on both networks and reports the maximum bus
+voltage/angle deviation (≈1e-4 kV / 1e-4 deg on IEEE-14, i.e. solver round-off).
 
 ## Dependencies
 
 - powsybl-core 7.1.1 (IIDM model + serde)
 - powsybl-open-loadflow 2.1.1 (validation only)
+- powsybl-ieee-cdf-converter 7.1.1 (IEEE-14 demo network)
 - commons-math3 3.6.1 (complex arithmetic)
 - picocli 4.7.6 (CLI)
 - slf4j 2.0.13

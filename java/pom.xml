@@ -64,6 +64,14 @@
             <version>${powsybl-open-loadflow.version}</version>
         </dependency>
 
+        <!-- IEEE CDF factories (IEEE14 test network) - used by the
+             bus-breaker to node-breaker converter and its IEEE-14 demo mode -->
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-ieee-cdf-converter</artifactId>
+            <version>${powsybl-core.version}</version>
+        </dependency>
+
         <!-- Complex arithmetic -->
         <dependency>
             <groupId>org.apache.commons</groupId>
