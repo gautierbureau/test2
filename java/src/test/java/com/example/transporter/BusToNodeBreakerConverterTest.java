@@ -2,6 +2,8 @@ package com.example.transporter;
 
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.*;
+import com.powsybl.iidm.network.extensions.ActivePowerControl;
+import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
 import com.powsybl.math.graph.TraverseResult;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
@@ -190,6 +192,46 @@ class BusToNodeBreakerConverterTest {
                 .getBusbarSectionCount());
         assertEquals(5, decoupled.getVoltageLevel("VL2").getNodeBreakerView()
                 .getBusbarSectionCount());
+    }
+
+    @Test
+    void preservesOperationalLimitsAndExtensions() {
+        Network source = IeeeCdfNetworkFactory.create14();
+
+        // A named limit group with a permanent + temporary current limit on both
+        // sides of a line, selected as the active group.
+        Line line = source.getLine("L1-2-1");
+        for (int side = 1; side <= 2; side++) {
+            OperationalLimitsGroup g = side == 1
+                    ? line.newOperationalLimitsGroup1("SET_A")
+                    : line.newOperationalLimitsGroup2("SET_A");
+            g.newCurrentLimits().setPermanentLimit(1000.0)
+                    .beginTemporaryLimit().setName("IT20min").setAcceptableDuration(1200)
+                    .setValue(1100.0).endTemporaryLimit()
+                    .add();
+        }
+        line.setSelectedOperationalLimitsGroup1("SET_A");
+        line.setSelectedOperationalLimitsGroup2("SET_A");
+
+        // An id-keyed extension the rebuild used to drop.
+        source.getGenerator("B1-G").newExtension(ActivePowerControlAdder.class)
+                .withParticipate(true).withDroop(4.0).withParticipationFactor(100.0).add();
+
+        Network target = BusToNodeBreakerConverter.convert(source);
+
+        Line converted = target.getLine("L1-2-1");
+        assertEquals(java.util.Optional.of("SET_A"),
+                converted.getSelectedOperationalLimitsGroupId1());
+        CurrentLimits cl = converted.getOperationalLimitsGroup1("SET_A").orElseThrow()
+                .getCurrentLimits().orElseThrow();
+        assertEquals(1000.0, cl.getPermanentLimit(), 1e-9);
+        assertNotNull(cl.getTemporaryLimit(1200));
+        assertEquals(1100.0, cl.getTemporaryLimit(1200).getValue(), 1e-9);
+
+        ActivePowerControl<Generator> apc = target.getGenerator("B1-G")
+                .getExtension(ActivePowerControl.class);
+        assertNotNull(apc, "activePowerControl extension must survive conversion");
+        assertEquals(100.0, apc.getParticipationFactor(), 1e-9);
     }
 
     /** Busbar section id the given generator's feeder reaches. */

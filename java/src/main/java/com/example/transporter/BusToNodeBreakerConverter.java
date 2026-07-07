@@ -3,6 +3,8 @@ package com.example.transporter;
 import com.powsybl.iidm.modification.topology.CreateBranchFeederBaysBuilder;
 import com.powsybl.iidm.modification.topology.CreateFeederBayBuilder;
 import com.powsybl.iidm.network.*;
+import com.powsybl.iidm.network.extensions.ActivePowerControl;
+import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -284,6 +286,10 @@ public final class BusToNodeBreakerConverter {
             copyTapChangers3wt(target, t3);
         }
 
+        // 6b. Extensions attached to a connectable by id (the rebuild would
+        //     otherwise drop them).
+        copyExtensions(source, target);
+
         // 7. Reject anything not handled above, loudly rather than silently.
         rejectUnsupported(source);
 
@@ -521,6 +527,7 @@ public final class BusToNodeBreakerConverter {
         dl.getOptionalName().ifPresent(adder::setName);
 
         createInjectionBay(target, adder, feederBus(dl.getTerminal()), busToBbs, nextOrder);
+        copyFlowsLimitGroups(dl, target.getBoundaryLine(dl.getId()));
     }
 
     private static void copyVscConverterStation(Network target, VscConverterStation vsc,
@@ -573,9 +580,7 @@ public final class BusToNodeBreakerConverter {
                 feederBus(line.getTerminal1()), feederBus(line.getTerminal2()),
                 busToBbs, nextOrder);
 
-        Line created = target.getLine(line.getId());
-        line.getCurrentLimits1().ifPresent(cl -> copyCurrentLimits(cl, created.newCurrentLimits1()));
-        line.getCurrentLimits2().ifPresent(cl -> copyCurrentLimits(cl, created.newCurrentLimits2()));
+        copyBranchLimitGroups(line, target.getLine(line.getId()));
     }
 
     private static void copyTwoWindingsTransformer(Network target, TwoWindingsTransformer tx,
@@ -601,9 +606,7 @@ public final class BusToNodeBreakerConverter {
                 feederBus(tx.getTerminal1()), feederBus(tx.getTerminal2()),
                 busToBbs, nextOrder);
 
-        TwoWindingsTransformer created = target.getTwoWindingsTransformer(tx.getId());
-        tx.getCurrentLimits1().ifPresent(cl -> copyCurrentLimits(cl, created.newCurrentLimits1()));
-        tx.getCurrentLimits2().ifPresent(cl -> copyCurrentLimits(cl, created.newCurrentLimits2()));
+        copyBranchLimitGroups(tx, target.getTwoWindingsTransformer(tx.getId()));
     }
 
     /**
@@ -658,7 +661,7 @@ public final class BusToNodeBreakerConverter {
         for (int s = 1; s <= 3; s++) {
             ThreeWindingsTransformer.Leg srcLeg = t3.getLeg(ThreeSides.valueOf(s));
             ThreeWindingsTransformer.Leg dstLeg = created.getLeg(ThreeSides.valueOf(s));
-            srcLeg.getCurrentLimits().ifPresent(cl -> copyCurrentLimits(cl, dstLeg.newCurrentLimits()));
+            copyFlowsLimitGroups(srcLeg, dstLeg);
         }
     }
 
@@ -830,7 +833,39 @@ public final class BusToNodeBreakerConverter {
         }
     }
 
-    private static void copyCurrentLimits(CurrentLimits src, CurrentLimitsAdder dst) {
+    /**
+     * Copy every operational-limit group of a branch (both sides) and restore
+     * the selected group. The rebuild would otherwise drop all but nothing, so
+     * this preserves each current / apparent-power / active-power limit and the
+     * active group id.
+     */
+    private static void copyBranchLimitGroups(Branch<?> src, Branch<?> dst) {
+        for (OperationalLimitsGroup g : src.getOperationalLimitsGroups1()) {
+            copyLimitGroup(g, dst.newOperationalLimitsGroup1(g.getId()));
+        }
+        src.getSelectedOperationalLimitsGroupId1().ifPresent(dst::setSelectedOperationalLimitsGroup1);
+        for (OperationalLimitsGroup g : src.getOperationalLimitsGroups2()) {
+            copyLimitGroup(g, dst.newOperationalLimitsGroup2(g.getId()));
+        }
+        src.getSelectedOperationalLimitsGroupId2().ifPresent(dst::setSelectedOperationalLimitsGroup2);
+    }
+
+    /** Copy every operational-limit group of a single-terminal holder (leg, boundary line). */
+    private static void copyFlowsLimitGroups(FlowsLimitsHolder src, FlowsLimitsHolder dst) {
+        for (OperationalLimitsGroup g : src.getOperationalLimitsGroups()) {
+            copyLimitGroup(g, dst.newOperationalLimitsGroup(g.getId()));
+        }
+        src.getSelectedOperationalLimitsGroupId().ifPresent(dst::setSelectedOperationalLimitsGroup);
+    }
+
+    private static void copyLimitGroup(OperationalLimitsGroup src, OperationalLimitsGroup dst) {
+        src.getCurrentLimits().ifPresent(l -> copyLoadingLimits(l, dst.newCurrentLimits()));
+        src.getApparentPowerLimits().ifPresent(l -> copyLoadingLimits(l, dst.newApparentPowerLimits()));
+        src.getActivePowerLimits().ifPresent(l -> copyLoadingLimits(l, dst.newActivePowerLimits()));
+    }
+
+    private static <A extends LoadingLimitsAdder<?, A>> void copyLoadingLimits(
+            LoadingLimits src, A dst) {
         dst.setPermanentLimit(src.getPermanentLimit());
         for (LoadingLimits.TemporaryLimit tl : src.getTemporaryLimits()) {
             dst.beginTemporaryLimit()
@@ -841,6 +876,28 @@ public final class BusToNodeBreakerConverter {
                     .endTemporaryLimit();
         }
         dst.add();
+    }
+
+    /**
+     * Copy connectable extensions that the rebuild would drop. The powsybl Java
+     * model has no generic extension clone, so the ones attached by this
+     * project's tooling are copied explicitly; extensions bound to a terminal or
+     * to feeder position (which the conversion itself sets) are intentionally
+     * left out.
+     */
+    private static void copyExtensions(Network source, Network target) {
+        for (Generator src : source.getGenerators()) {
+            ActivePowerControl<Generator> apc = src.getExtension(ActivePowerControl.class);
+            Generator dst = target.getGenerator(src.getId());
+            if (apc == null || dst == null) {
+                continue;
+            }
+            dst.newExtension(ActivePowerControlAdder.class)
+                    .withParticipate(apc.isParticipate())
+                    .withDroop(apc.getDroop())
+                    .withParticipationFactor(apc.getParticipationFactor())
+                    .add();
+        }
     }
 
     /** Configured bus a terminal feeds from (works even if disconnected). */

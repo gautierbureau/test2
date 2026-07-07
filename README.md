@@ -51,6 +51,14 @@ changers), HVDC lines, tie lines, linear/non-linear shunts and bus couplers
 an extended IEEE-14 exercising every added type, and on PEGASE 1354/2869/9241
 (the last needs a DC-start fallback, applied automatically by `validate()`).
 
+The rebuild **preserves operational limits and extensions**: every
+operational-limit group (current / apparent-power / active-power, all named
+groups, not just the selected one) is copied over with the active group
+restored, and connectable extensions keyed by element id (e.g.
+`activePowerControl`, `generatorShortCircuit`) are carried across. Extensions the
+conversion sets itself (feeder `position`) and terminal-bound ones (e.g.
+`slackTerminal`) are left to the rebuild.
+
 The two busbar-layout counts are **decoupled**: `one_busbar_per_generator`
 (default) puts each generator on its own busbar section on the buses that host
 generators, while `busbar_sections_per_bus` sets how many sections the buses

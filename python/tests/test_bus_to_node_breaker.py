@@ -203,6 +203,40 @@ def test_extended_network_all_types():
     assert result["max_dangle_deg"] < 1e-1
 
 
+def test_preserves_operational_limits_and_extensions():
+    net = pn.create_ieee14()
+    # A named current-limit group (permanent + temporary) on both sides of a line,
+    # selected as the active group.
+    rows = []
+    for side in ("ONE", "TWO"):
+        rows.append({"element_id": "L1-2-1", "side": side, "name": "permanent_limit",
+                     "type": "CURRENT", "value": 1000.0, "acceptable_duration": -1,
+                     "group_name": "SET_A"})
+        rows.append({"element_id": "L1-2-1", "side": side, "name": "IT20min",
+                     "type": "CURRENT", "value": 1100.0, "acceptable_duration": 1200,
+                     "group_name": "SET_A"})
+    net.create_operational_limits(pd.DataFrame(rows).set_index("element_id"))
+    net.update_lines(id=["L1-2-1"], selected_limits_group_1=["SET_A"],
+                     selected_limits_group_2=["SET_A"])
+    # An id-keyed extension the rebuild used to drop.
+    net.create_extensions("activePowerControl", id=["B1-G"], participate=[True],
+                          droop=[4.0], participation_factor=[100.0])
+
+    target = convert(net)
+
+    ol = target.get_operational_limits(show_inactive_sets=True)
+    assert not ol.empty
+    groups = set(ol.index.get_level_values("group_name"))
+    assert "SET_A" in groups
+    sel = target.get_lines(attributes=["selected_limits_group_1", "selected_limits_group_2"])
+    assert sel.loc["L1-2-1", "selected_limits_group_1"] == "SET_A"
+    assert sel.loc["L1-2-1", "selected_limits_group_2"] == "SET_A"
+
+    apc = target.get_extensions("activePowerControl")
+    assert "B1-G" in apc.index
+    assert apc.loc["B1-G", "participation_factor"] == 100.0
+
+
 def test_rejects_node_breaker_input():
     # A network that is already node-breaker cannot be converted.
     node_breaker = convert(pn.create_ieee14())
