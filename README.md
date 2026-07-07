@@ -37,7 +37,7 @@ capability curve transported analytically through the transformer pi-model.
 electrically identical node-breaker network: one busbar section per bus, with
 every feeder reconnected through a disconnector + breaker bay (powsybl's
 `CreateFeederBay` / `CreateBranchFeederBays`). Validated on IEEE-14 and on an
-extended IEEE-14 that adds one of every supported type — battery, SVC, dangling
+extended IEEE-14 that adds one of every supported type — battery, SVC, boundary
 line, non-linear shunt, ratio/phase tap changers, three-winding transformer,
 VSC HVDC, LCC HVDC, a tie line and a bus coupler — with an AC load flow matching
 the original bus-for-bus. Every IIDM connectable except `Ground` is handled.

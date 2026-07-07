@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Convert the extended IEEE-14 network (which adds a battery, an SVC, a
- * dangling line, a non-linear shunt, ratio/phase tap changers, a three-winding
+ * boundary line, a non-linear shunt, ratio/phase tap changers, a three-winding
  * transformer, a VSC HVDC link and a bus coupler) and check that every added
  * type survives the round trip and that the conversion stays electrically
  * transparent.

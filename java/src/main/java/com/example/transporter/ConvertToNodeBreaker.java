@@ -55,7 +55,7 @@ public class ConvertToNodeBreaker implements Callable<Integer> {
     private boolean ieee14;
 
     @Option(names = {"--ieee14-extended"},
-            description = "Use the extended IEEE-14 network (adds a battery, SVC, dangling "
+            description = "Use the extended IEEE-14 network (adds a battery, SVC, boundary "
                     + "line, non-linear shunt, tap changers, a 3-winding transformer, a VSC "
                     + "HVDC link and a bus coupler) as input.")
     private boolean ieee14Extended;
