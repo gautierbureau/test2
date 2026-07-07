@@ -112,7 +112,9 @@ class BusToNodeBreakerConverterTest {
                 .flatMap(vl -> vl.getBusBreakerView().getBusStream()).count();
 
         int n = 3;
-        Network target = BusToNodeBreakerConverter.convert(source, n);
+        // With the one-busbar-per-generator policy off, busbarSectionsPerBus
+        // applies to every bus, so each becomes exactly n sections.
+        Network target = BusToNodeBreakerConverter.convert(source, n, false);
 
         // n busbar sections per bus, joined by n-1 closed coupler breakers each.
         assertEquals(buses * n, target.getBusbarSectionCount());
@@ -180,6 +182,14 @@ class BusToNodeBreakerConverterTest {
         // Turning the policy off collapses B1 back to a single busbar section.
         Network flat = BusToNodeBreakerConverter.convert(net, 1, false);
         assertEquals(2, flat.getBusbarSectionCount());
+
+        // busbarSectionsPerBus controls only non-generator buses: the 3-unit bus
+        // still gets 3 sections (one per generator), the load bus gets 5.
+        Network decoupled = BusToNodeBreakerConverter.convert(net, 5, true);
+        assertEquals(3, decoupled.getVoltageLevel("VL1").getNodeBreakerView()
+                .getBusbarSectionCount());
+        assertEquals(5, decoupled.getVoltageLevel("VL2").getNodeBreakerView()
+                .getBusbarSectionCount());
     }
 
     /** Busbar section id the given generator's feeder reaches. */

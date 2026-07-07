@@ -40,6 +40,8 @@ DEFAULT_POWER_FACTOR = 0.95
 DEFAULT_PLACEHOLDER_THRESHOLD = 1e4  # |Q| at/above this (MVar) is a placeholder
 DEFAULT_RTC_STEPS_PER_SIDE = 8
 DEFAULT_RTC_STEP_INCREMENT = 0.0125  # 1.25 % per step -> +/-10 % over 8 steps
+DEFAULT_ENERGY_SOURCE = "THERMAL"
+DEFAULT_DROOP = 4.0  # percent
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +218,95 @@ def _side2_voltage(tx, buses) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
+# Generator energy source
+# ---------------------------------------------------------------------------
+
+def set_generator_energy_source(
+    network: pn.Network,
+    energy_source: str = DEFAULT_ENERGY_SOURCE,
+    only_undefined: bool = True,
+) -> dict:
+    """Assign an energy source to generators that carry none.
+
+    A load flow cannot infer fuel type, so this is a blanket default: generators
+    whose energy source is ``OTHER`` (the IIDM "unset" value) are set to
+    ``energy_source``. With ``only_undefined=False`` every generator is set.
+    """
+    valid = {"HYDRO", "NUCLEAR", "WIND", "THERMAL", "SOLAR", "OTHER"}
+    if energy_source not in valid:
+        raise ValueError(f"energy_source must be one of {sorted(valid)}")
+
+    gens = network.get_generators(all_attributes=True)
+    stats = {"generators": len(gens), "set": 0, "skipped_defined": 0}
+    if gens.empty:
+        return stats
+    if only_undefined:
+        target = gens.index[gens["energy_source"] == "OTHER"]
+        stats["skipped_defined"] = len(gens) - len(target)
+    else:
+        target = gens.index
+    if len(target):
+        network.update_generators(id=list(target),
+                                  energy_source=[energy_source] * len(target))
+        stats["set"] = len(target)
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Active power control (participation factors)
+# ---------------------------------------------------------------------------
+
+def add_active_power_control(
+    network: pn.Network,
+    droop: float = DEFAULT_DROOP,
+    only_missing: bool = True,
+) -> dict:
+    """Give generators an active-power-control participation factor.
+
+    Sets the ``activePowerControl`` extension with ``participate = True`` and a
+    participation factor proportional to the generator's active-power capability
+    (``max_p``, falling back to ``target_p`` then 1), so distributed slack /
+    redispatch has something to act on. Generators that already carry the
+    extension are left untouched when ``only_missing``.
+    """
+    if not droop > 0:
+        raise ValueError("droop must be positive")
+
+    gens = network.get_generators(all_attributes=True)
+    stats = {"generators": len(gens), "added": 0, "skipped_existing": 0}
+    if gens.empty:
+        return stats
+
+    existing = set()
+    if only_missing:
+        try:
+            existing = set(network.get_extensions("activePowerControl").index)
+        except Exception:  # noqa: BLE001 - extension table may be absent
+            existing = set()
+
+    ids, factors = [], []
+    for gid, g in gens.iterrows():
+        if gid in existing:
+            stats["skipped_existing"] += 1
+            continue
+        ids.append(gid)
+        factors.append(_participation_factor(g))
+    if ids:
+        network.create_extensions(
+            "activePowerControl", id=ids, participate=[True] * len(ids),
+            droop=[droop] * len(ids), participation_factor=factors)
+        stats["added"] = len(ids)
+    return stats
+
+
+def _participation_factor(g) -> float:
+    for value in (g["max_p"], g["target_p"]):
+        if math.isfinite(value) and value > 0:
+            return float(value)
+    return 1.0
+
+
+# ---------------------------------------------------------------------------
 # Load flow
 # ---------------------------------------------------------------------------
 
@@ -251,8 +342,9 @@ _BUILTINS = {
 
 def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Fill in missing generator reactive limits and/or ratio tap "
-                    "changers on a network, sized from an AC load flow.")
+        description="Fill in missing network data (reactive limits, ratio tap "
+                    "changers, generator energy source, active power control), "
+                    "sized from an AC load flow. With no completion flag, all run.")
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("-i", "--input", help="input network file")
     src.add_argument("--builtin", choices=sorted(_BUILTINS),
@@ -262,6 +354,10 @@ def _main(argv=None) -> int:
                         help="fill missing/placeholder generator reactive limits")
     parser.add_argument("--ratio-tap-changers", action="store_true",
                         help="add regulating ratio tap changers where missing")
+    parser.add_argument("--energy-source", action="store_true",
+                        help="set energy source on generators that have none")
+    parser.add_argument("--active-power-control", action="store_true",
+                        help="add participation factors for distributed slack")
     parser.add_argument("--power-factor", type=float, default=DEFAULT_POWER_FACTOR,
                         help="reactive sizing fallback power factor "
                              f"(default: {DEFAULT_POWER_FACTOR})")
@@ -271,14 +367,22 @@ def _main(argv=None) -> int:
     parser.add_argument("--rtc-step", type=float, default=DEFAULT_RTC_STEP_INCREMENT,
                         help="ratio tap changer step increment "
                              f"(default: {DEFAULT_RTC_STEP_INCREMENT})")
+    parser.add_argument("--energy-source-value", default=DEFAULT_ENERGY_SOURCE,
+                        help=f"energy source to assign (default: {DEFAULT_ENERGY_SOURCE})")
+    parser.add_argument("--droop", type=float, default=DEFAULT_DROOP,
+                        help=f"active power control droop percent (default: {DEFAULT_DROOP})")
     args = parser.parse_args(argv)
 
-    # With no explicit selection, run both completions.
-    do_reactive = args.reactive_limits or not args.ratio_tap_changers
-    do_taps = args.ratio_tap_changers or not args.reactive_limits
+    # With no explicit selection, run every completion.
+    selected = (args.reactive_limits or args.ratio_tap_changers
+                or args.energy_source or args.active_power_control)
+    do_reactive = args.reactive_limits or not selected
+    do_taps = args.ratio_tap_changers or not selected
+    do_energy = args.energy_source or not selected
+    do_apc = args.active_power_control or not selected
 
     network = _BUILTINS[args.builtin]() if args.builtin else pn.load(args.input)
-    # One load flow shared by both completions.
+    # One load flow shared by all completions.
     _run_ac_or_raise(network, None)
 
     if do_reactive:
@@ -293,6 +397,14 @@ def _main(argv=None) -> int:
         print(f"Ratio tap changers: added {t['added']} of {t['transformers']} "
               f"transformer(s) ({t['skipped_existing']} already had a tap changer, "
               f"{t['skipped_no_voltage']} without a base-case voltage).")
+    if do_energy:
+        e = set_generator_energy_source(network, energy_source=args.energy_source_value)
+        print(f"Energy source: set {e['set']} of {e['generators']} generator(s) to "
+              f"{args.energy_source_value} ({e['skipped_defined']} already defined).")
+    if do_apc:
+        a = add_active_power_control(network, droop=args.droop)
+        print(f"Active power control: added {a['added']} of {a['generators']} "
+              f"generator(s) ({a['skipped_existing']} already had it).")
 
     if args.output:
         network.save(args.output, format="XIIDM")
