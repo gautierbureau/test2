@@ -96,6 +96,7 @@ curve-transporter/
     ├── EquivalentBuilder.java          mutate the network in place
     ├── Main.java                       picocli CLI entry point
     ├── BusToNodeBreakerConverter.java  bus-breaker → node-breaker converter
+    ├── ExtendedIeee14Factory.java      IEEE-14 grown with extra equipment types
     └── ConvertToNodeBreaker.java       picocli CLI for the converter
 ```
 
@@ -109,24 +110,35 @@ breaker — using powsybl's `CreateFeederBay` / `CreateBranchFeederBays`
 modifications. The transformation is purely topological, so a load flow on the
 result matches the original bus-for-bus.
 
-Supported equipment (covers the IEEE-14 scoping network): generators (min/max
-or curve reactive limits), loads, linear/non-linear shunts, lines and
-two-winding transformers with their current limits, and bus couplers (mapped to
-breakers between busbars). Three-winding transformers, HVDC, SVCs, dangling
-lines, batteries and tie lines raise a clear `UnsupportedOperationException`
-rather than failing silently.
+Supported equipment: generators (min/max or curve reactive limits), loads,
+batteries, static var compensators, dangling lines and VSC converter stations
+(all reconnected as injection bays); lines, two- and three-winding transformers
+with their ratio/phase tap changers and current limits; HVDC lines;
+linear/non-linear shunts; and bus couplers (mapped to breakers between
+busbars). Only LCC converter stations and tie lines are still unhandled — they
+raise a clear `UnsupportedOperationException` rather than failing silently.
 
-Run it on the bundled IEEE-14 network (or any bus-breaker `.xiidm`):
+Run it on the bundled IEEE-14 network, the extended IEEE-14 network (which adds
+one of every supported extra type), or any bus-breaker `.xiidm`:
 
 ```bash
 java -cp target/curve-transporter-1.0.0-shaded.jar \
      com.example.transporter.ConvertToNodeBreaker \
      --ieee14 -o /tmp/ieee14_nb.xiidm --validate
-# or: --input path/to/bus_breaker.xiidm -o out.xiidm --validate
+# --ieee14-extended : IEEE-14 + battery, SVC, dangling line, non-linear shunt,
+#                     ratio/phase tap changers, 3-winding transformer, VSC HVDC
+#                     and a bus coupler
+# --input path/to/bus_breaker.xiidm -o out.xiidm --validate
 ```
 
 `--validate` runs an AC load flow on both networks and reports the maximum bus
-voltage/angle deviation (≈1e-4 kV / 1e-4 deg on IEEE-14, i.e. solver round-off).
+voltage/angle deviation (≈1e-4 kV / 1e-4 deg on IEEE-14; ≈1e-3 kV / 1e-2 deg on
+the extended network, where the SVC control loop adds a little solver noise).
+
+The three-winding transformer is the one type powsybl has no ready-made feeder
+bay for, so the converter builds each of its three bays by hand (a disconnector
+to the busbar plus a series breaker per leg); every other type goes through
+`CreateFeederBay` / `CreateBranchFeederBays`.
 
 ## Dependencies
 

@@ -36,18 +36,25 @@ capability curve transported analytically through the transformer pi-model.
 (`BusToNodeBreakerConverter`). Given a bus-breaker network it builds an
 electrically identical node-breaker network: one busbar section per bus, with
 every feeder reconnected through a disconnector + breaker bay (powsybl's
-`CreateFeederBay` / `CreateBranchFeederBays`). Scoped and validated on IEEE-14 —
-an AC load flow matches the original bus-for-bus (max deviation ≈1e-4 kV).
+`CreateFeederBay` / `CreateBranchFeederBays`). Validated on IEEE-14 and on an
+extended IEEE-14 that adds one of every supported type — battery, SVC, dangling
+line, non-linear shunt, ratio/phase tap changers, three-winding transformer,
+VSC HVDC and a bus coupler — with an AC load flow matching the original
+bus-for-bus.
 
 ```
 cd java
 mvn clean package -DskipTests
 java -cp target/curve-transporter-1.0.0-shaded.jar \
      com.example.transporter.ConvertToNodeBreaker \
-     --ieee14 -o /tmp/ieee14_nb.xiidm --validate
+     --ieee14          -o /tmp/ieee14_nb.xiidm     --validate
+java -cp target/curve-transporter-1.0.0-shaded.jar \
+     com.example.transporter.ConvertToNodeBreaker \
+     --ieee14-extended -o /tmp/ieee14_ext_nb.xiidm --validate
 ```
 
-See `java/README.md` for supported equipment and current limitations.
+See `java/README.md` for the full list of supported equipment and current
+limitations.
 
 The test network is stored as a resource file at
 `java/src/main/resources/test_network.xiidm`. It was exported by the Python

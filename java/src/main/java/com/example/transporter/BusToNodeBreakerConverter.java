@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -41,13 +42,13 @@ import java.util.Map;
  * voltage level's topology kind is immutable in IIDM, so the network has to be
  * rebuilt rather than mutated in place.
  *
- * <p>Supported equipment (covers the IEEE-14 scoping network): generators
- * (min/max or curve reactive limits), loads, linear and non-linear shunt
- * compensators, lines and two-winding transformers, together with their
- * operational current limits. Bus couplers become breakers between the two
- * busbar sections they join. Element types not yet handled
- * (three-winding transformers, HVDC, static var compensators, dangling lines,
- * batteries, tie lines) raise a clear {@link UnsupportedOperationException} so
+ * <p>Supported equipment: generators, loads, batteries, static var
+ * compensators, dangling lines and VSC converter stations (all reconnected as
+ * injection bays); lines, two- and three-winding transformers with their
+ * ratio/phase tap changers and current limits; HVDC lines; linear and
+ * non-linear shunt compensators. Bus couplers become breakers between the two
+ * busbar sections they join. Element types not yet handled (LCC converter
+ * stations, tie lines) raise a clear {@link UnsupportedOperationException} so
  * an unsupported input never fails silently.
  */
 public final class BusToNodeBreakerConverter {
@@ -108,16 +109,45 @@ public final class BusToNodeBreakerConverter {
         for (ShuntCompensator sh : source.getShuntCompensators()) {
             copyShunt(target, sh, busToBbs, nextOrder);
         }
+        for (Battery b : source.getBatteries()) {
+            copyBattery(target, b, busToBbs, nextOrder);
+        }
+        for (StaticVarCompensator svc : source.getStaticVarCompensators()) {
+            copyStaticVarCompensator(target, svc, busToBbs, nextOrder);
+        }
+        for (DanglingLine dl : source.getDanglingLines()) {
+            copyDanglingLine(target, dl, busToBbs, nextOrder);
+        }
+        for (VscConverterStation vsc : source.getVscConverterStations()) {
+            copyVscConverterStation(target, vsc, busToBbs, nextOrder);
+        }
 
-        // 4. Branches.
+        // 4. Branches (two- and three-winding transformers, lines).
         for (Line line : source.getLines()) {
             copyLine(target, line, busToBbs, nextOrder);
         }
         for (TwoWindingsTransformer tx : source.getTwoWindingsTransformers()) {
             copyTwoWindingsTransformer(target, tx, busToBbs, nextOrder);
         }
+        for (ThreeWindingsTransformer t3 : source.getThreeWindingsTransformers()) {
+            copyThreeWindingsTransformer(target, t3, busToBbs);
+        }
 
-        // 5. Reject anything not handled above, loudly rather than silently.
+        // 5. HVDC lines - both converter stations now exist as injections.
+        for (HvdcLine hvdc : source.getHvdcLines()) {
+            copyHvdcLine(target, hvdc);
+        }
+
+        // 6. Tap changers - copied once every terminal exists so a tap changer
+        //    that regulates a remote terminal can be re-pointed at it.
+        for (TwoWindingsTransformer tx : source.getTwoWindingsTransformers()) {
+            copyTapChangers2wt(target, tx);
+        }
+        for (ThreeWindingsTransformer t3 : source.getThreeWindingsTransformers()) {
+            copyTapChangers3wt(target, t3);
+        }
+
+        // 7. Reject anything not handled above, loudly rather than silently.
         rejectUnsupported(source);
 
         LOGGER.info("Converted '{}' to node-breaker: {} substation(s), {} voltage level(s), "
@@ -286,6 +316,77 @@ public final class BusToNodeBreakerConverter {
         createInjectionBay(target, adder, feederBus(sh.getTerminal()), busToBbs, nextOrder);
     }
 
+    private static void copyBattery(Network target, Battery b,
+                                    Map<String, String> busToBbs,
+                                    Map<String, Integer> nextOrder) {
+        VoltageLevel tvl = target.getVoltageLevel(b.getTerminal().getVoltageLevel().getId());
+        BatteryAdder adder = tvl.newBattery()
+                .setId(b.getId())
+                .setMinP(b.getMinP())
+                .setMaxP(b.getMaxP())
+                .setTargetP(b.getTargetP())
+                .setTargetQ(b.getTargetQ());
+        b.getOptionalName().ifPresent(adder::setName);
+
+        createInjectionBay(target, adder, feederBus(b.getTerminal()), busToBbs, nextOrder);
+        copyReactiveLimits(b, target.getBattery(b.getId()));
+    }
+
+    private static void copyStaticVarCompensator(Network target, StaticVarCompensator svc,
+                                                 Map<String, String> busToBbs,
+                                                 Map<String, Integer> nextOrder) {
+        VoltageLevel tvl = target.getVoltageLevel(svc.getTerminal().getVoltageLevel().getId());
+        StaticVarCompensatorAdder adder = tvl.newStaticVarCompensator()
+                .setId(svc.getId())
+                .setBmin(svc.getBmin())
+                .setBmax(svc.getBmax())
+                .setVoltageSetpoint(svc.getVoltageSetpoint())
+                .setReactivePowerSetpoint(svc.getReactivePowerSetpoint())
+                .setRegulating(svc.isRegulating());
+        if (svc.getRegulationMode() != null) {
+            adder.setRegulationMode(svc.getRegulationMode());
+        }
+        svc.getOptionalName().ifPresent(adder::setName);
+
+        createInjectionBay(target, adder, feederBus(svc.getTerminal()), busToBbs, nextOrder);
+    }
+
+    private static void copyDanglingLine(Network target, DanglingLine dl,
+                                         Map<String, String> busToBbs,
+                                         Map<String, Integer> nextOrder) {
+        VoltageLevel tvl = target.getVoltageLevel(dl.getTerminal().getVoltageLevel().getId());
+        DanglingLineAdder adder = tvl.newDanglingLine()
+                .setId(dl.getId())
+                .setP0(dl.getP0())
+                .setQ0(dl.getQ0())
+                .setR(dl.getR())
+                .setX(dl.getX())
+                .setG(dl.getG())
+                .setB(dl.getB());
+        if (dl.getPairingKey() != null) {
+            adder.setPairingKey(dl.getPairingKey());
+        }
+        dl.getOptionalName().ifPresent(adder::setName);
+
+        createInjectionBay(target, adder, feederBus(dl.getTerminal()), busToBbs, nextOrder);
+    }
+
+    private static void copyVscConverterStation(Network target, VscConverterStation vsc,
+                                                Map<String, String> busToBbs,
+                                                Map<String, Integer> nextOrder) {
+        VoltageLevel tvl = target.getVoltageLevel(vsc.getTerminal().getVoltageLevel().getId());
+        VscConverterStationAdder adder = tvl.newVscConverterStation()
+                .setId(vsc.getId())
+                .setLossFactor(vsc.getLossFactor())
+                .setVoltageRegulatorOn(vsc.isVoltageRegulatorOn())
+                .setVoltageSetpoint(vsc.getVoltageSetpoint())
+                .setReactivePowerSetpoint(vsc.getReactivePowerSetpoint());
+        vsc.getOptionalName().ifPresent(adder::setName);
+
+        createInjectionBay(target, adder, feederBus(vsc.getTerminal()), busToBbs, nextOrder);
+        copyReactiveLimits(vsc, target.getVscConverterStation(vsc.getId()));
+    }
+
     // ------------------------------------------------------------------
     // Branches
     // ------------------------------------------------------------------
@@ -315,11 +416,6 @@ public final class BusToNodeBreakerConverter {
     private static void copyTwoWindingsTransformer(Network target, TwoWindingsTransformer tx,
                                                    Map<String, String> busToBbs,
                                                    Map<String, Integer> nextOrder) {
-        if (tx.hasRatioTapChanger() || tx.hasPhaseTapChanger()) {
-            throw new UnsupportedOperationException(
-                    "Transformer " + tx.getId() + " has a tap changer, which the "
-                            + "bus-to-node-breaker converter does not copy yet.");
-        }
         Substation ts = tx.getSubstation()
                 .map(s -> target.getSubstation(s.getId()))
                 .orElseThrow(() -> new IllegalStateException(
@@ -343,6 +439,154 @@ public final class BusToNodeBreakerConverter {
         TwoWindingsTransformer created = target.getTwoWindingsTransformer(tx.getId());
         tx.getCurrentLimits1().ifPresent(cl -> copyCurrentLimits(cl, created.newCurrentLimits1()));
         tx.getCurrentLimits2().ifPresent(cl -> copyCurrentLimits(cl, created.newCurrentLimits2()));
+    }
+
+    /**
+     * Three-winding transformers have three terminals, so powsybl's
+     * {@code CreateBranchFeederBays} (two ends only) cannot help. Each leg's bay
+     * is built by hand: a disconnector from the leg's busbar section to a fresh
+     * node, then a breaker to the node the leg terminal sits on.
+     */
+    private static void copyThreeWindingsTransformer(Network target, ThreeWindingsTransformer t3,
+                                                     Map<String, String> busToBbs) {
+        Substation ts = t3.getSubstation()
+                .map(s -> target.getSubstation(s.getId()))
+                .orElseThrow(() -> new IllegalStateException(
+                        "Three-winding transformer without substation: " + t3.getId()));
+
+        ThreeWindingsTransformerAdder adder = ts.newThreeWindingsTransformer()
+                .setId(t3.getId())
+                .setRatedU0(t3.getRatedU0());
+        t3.getOptionalName().ifPresent(adder::setName);
+
+        int side = 1;
+        for (ThreeWindingsTransformer.Leg leg : t3.getLegs()) {
+            VoltageLevel tvl = target.getVoltageLevel(leg.getTerminal().getVoltageLevel().getId());
+            VoltageLevel.NodeBreakerView nbv = tvl.getNodeBreakerView();
+            int busbarNode = busbarNode(target, requireBbs(feederBus(leg.getTerminal()), busToBbs));
+            int mid = nbv.getMaximumNodeIndex() + 1;
+            int equip = mid + 1;
+            nbv.newDisconnector()
+                    .setId(t3.getId() + "_DISC_" + side).setNode1(busbarNode).setNode2(mid)
+                    .setOpen(false).add();
+            nbv.newBreaker()
+                    .setId(t3.getId() + "_BRK_" + side).setNode1(mid).setNode2(equip)
+                    .setOpen(false).add();
+
+            ThreeWindingsTransformerAdder.LegAdder legAdder = newLeg(adder, side)
+                    .setVoltageLevel(tvl.getId())
+                    .setNode(equip)
+                    .setR(leg.getR())
+                    .setX(leg.getX())
+                    .setG(leg.getG())
+                    .setB(leg.getB())
+                    .setRatedU(leg.getRatedU());
+            if (!Double.isNaN(leg.getRatedS())) {
+                legAdder.setRatedS(leg.getRatedS());
+            }
+            legAdder.add();
+            side++;
+        }
+        adder.add();
+
+        ThreeWindingsTransformer created = target.getThreeWindingsTransformer(t3.getId());
+        for (int s = 1; s <= 3; s++) {
+            ThreeWindingsTransformer.Leg srcLeg = t3.getLeg(ThreeSides.valueOf(s));
+            ThreeWindingsTransformer.Leg dstLeg = created.getLeg(ThreeSides.valueOf(s));
+            srcLeg.getCurrentLimits().ifPresent(cl -> copyCurrentLimits(cl, dstLeg.newCurrentLimits()));
+        }
+    }
+
+    private static void copyHvdcLine(Network target, HvdcLine hvdc) {
+        target.newHvdcLine()
+                .setId(hvdc.getId())
+                .setR(hvdc.getR())
+                .setNominalV(hvdc.getNominalV())
+                .setConvertersMode(hvdc.getConvertersMode())
+                .setActivePowerSetpoint(hvdc.getActivePowerSetpoint())
+                .setMaxP(hvdc.getMaxP())
+                .setConverterStationId1(hvdc.getConverterStation1().getId())
+                .setConverterStationId2(hvdc.getConverterStation2().getId())
+                .add();
+    }
+
+    // ------------------------------------------------------------------
+    // Tap changers (copied after every terminal exists)
+    // ------------------------------------------------------------------
+
+    private static void copyTapChangers2wt(Network target, TwoWindingsTransformer tx) {
+        TwoWindingsTransformer created = target.getTwoWindingsTransformer(tx.getId());
+        if (tx.hasRatioTapChanger()) {
+            copyRatioTapChanger(target, tx.getRatioTapChanger(), created.newRatioTapChanger());
+        }
+        if (tx.hasPhaseTapChanger()) {
+            copyPhaseTapChanger(target, tx.getPhaseTapChanger(), created.newPhaseTapChanger());
+        }
+    }
+
+    private static void copyTapChangers3wt(Network target, ThreeWindingsTransformer t3) {
+        ThreeWindingsTransformer created = target.getThreeWindingsTransformer(t3.getId());
+        for (int s = 1; s <= 3; s++) {
+            ThreeWindingsTransformer.Leg srcLeg = t3.getLeg(ThreeSides.valueOf(s));
+            ThreeWindingsTransformer.Leg dstLeg = created.getLeg(ThreeSides.valueOf(s));
+            if (srcLeg.hasRatioTapChanger()) {
+                copyRatioTapChanger(target, srcLeg.getRatioTapChanger(), dstLeg.newRatioTapChanger());
+            }
+            if (srcLeg.hasPhaseTapChanger()) {
+                copyPhaseTapChanger(target, srcLeg.getPhaseTapChanger(), dstLeg.newPhaseTapChanger());
+            }
+        }
+    }
+
+    private static void copyRatioTapChanger(Network target, RatioTapChanger src,
+                                            RatioTapChangerAdder adder) {
+        adder.setLowTapPosition(src.getLowTapPosition())
+                .setTapPosition(src.getTapPosition())
+                .setLoadTapChangingCapabilities(src.hasLoadTapChangingCapabilities())
+                .setRegulating(src.isRegulating())
+                .setTargetDeadband(src.getTargetDeadband())
+                .setTargetV(src.getTargetV());
+        if (src.getRegulationMode() != null) {
+            adder.setRegulationMode(src.getRegulationMode());
+            adder.setRegulationValue(src.getRegulationValue());
+        }
+        for (int p = src.getLowTapPosition(); p <= src.getHighTapPosition(); p++) {
+            RatioTapChangerStep step = src.getStep(p);
+            adder.beginStep()
+                    .setRho(step.getRho())
+                    .setR(step.getR()).setX(step.getX())
+                    .setG(step.getG()).setB(step.getB())
+                    .endStep();
+        }
+        Terminal regTerm = mapTerminal(target, src.getRegulationTerminal());
+        if (regTerm != null) {
+            adder.setRegulationTerminal(regTerm);
+        }
+        adder.add();
+    }
+
+    private static void copyPhaseTapChanger(Network target, PhaseTapChanger src,
+                                            PhaseTapChangerAdder adder) {
+        adder.setLowTapPosition(src.getLowTapPosition())
+                .setTapPosition(src.getTapPosition())
+                .setRegulating(src.isRegulating())
+                .setTargetDeadband(src.getTargetDeadband())
+                .setRegulationMode(src.getRegulationMode())
+                .setRegulationValue(src.getRegulationValue());
+        for (int p = src.getLowTapPosition(); p <= src.getHighTapPosition(); p++) {
+            PhaseTapChangerStep step = src.getStep(p);
+            adder.beginStep()
+                    .setAlpha(step.getAlpha())
+                    .setRho(step.getRho())
+                    .setR(step.getR()).setX(step.getX())
+                    .setG(step.getG()).setB(step.getB())
+                    .endStep();
+        }
+        Terminal regTerm = mapTerminal(target, src.getRegulationTerminal());
+        if (regTerm != null) {
+            adder.setRegulationTerminal(regTerm);
+        }
+        adder.add();
     }
 
     // ------------------------------------------------------------------
@@ -387,7 +631,7 @@ public final class BusToNodeBreakerConverter {
     // Small helpers
     // ------------------------------------------------------------------
 
-    private static void copyReactiveLimits(Generator src, Generator dst) {
+    private static void copyReactiveLimits(ReactiveLimitsHolder src, ReactiveLimitsHolder dst) {
         ReactiveLimits limits = src.getReactiveLimits();
         if (limits instanceof MinMaxReactiveLimits mm) {
             dst.newMinMaxReactiveLimits().setMinQ(mm.getMinQ()).setMaxQ(mm.getMaxQ()).add();
@@ -431,6 +675,44 @@ public final class BusToNodeBreakerConverter {
         return bbsId;
     }
 
+    private static int busbarNode(Network target, String bbsId) {
+        return target.getBusbarSection(bbsId).getTerminal().getNodeBreakerView().getNode();
+    }
+
+    private static ThreeWindingsTransformerAdder.LegAdder newLeg(
+            ThreeWindingsTransformerAdder adder, int side) {
+        return switch (side) {
+            case 1 -> adder.newLeg1();
+            case 2 -> adder.newLeg2();
+            case 3 -> adder.newLeg3();
+            default -> throw new IllegalArgumentException("Invalid leg side: " + side);
+        };
+    }
+
+    /**
+     * Find, in the target network, the terminal that corresponds to a source
+     * terminal - same connectable id, same side. Returns {@code null} if the
+     * source terminal is {@code null} or its connectable was not recreated.
+     */
+    private static Terminal mapTerminal(Network target, Terminal src) {
+        if (src == null) {
+            return null;
+        }
+        Connectable<?> srcConn = src.getConnectable();
+        Connectable<?> dstConn = target.getConnectable(srcConn.getId());
+        if (dstConn == null) {
+            return null;
+        }
+        List<? extends Terminal> srcTerms = srcConn.getTerminals();
+        List<? extends Terminal> dstTerms = dstConn.getTerminals();
+        for (int i = 0; i < srcTerms.size() && i < dstTerms.size(); i++) {
+            if (srcTerms.get(i) == src) {
+                return dstTerms.get(i);
+            }
+        }
+        return null;
+    }
+
     private static int nextOrder(String vlId, Map<String, Integer> nextOrder) {
         int order = nextOrder.getOrDefault(vlId, 1);
         nextOrder.put(vlId, order + 1);
@@ -447,28 +729,16 @@ public final class BusToNodeBreakerConverter {
 
     /** Fail fast on equipment types the converter does not reproduce yet. */
     private static void rejectUnsupported(Network source) {
-        if (source.getThreeWindingsTransformerCount() > 0) {
+        long lccCount = source.getHvdcConverterStationStream()
+                .filter(s -> s.getHvdcType() == HvdcConverterStation.HvdcType.LCC)
+                .count();
+        if (lccCount > 0) {
             throw new UnsupportedOperationException(
-                    "Three-winding transformers are not supported yet ("
-                            + source.getThreeWindingsTransformerCount() + " found).");
+                    "LCC converter stations are not supported yet (" + lccCount + " found).");
         }
-        if (source.getHvdcLineCount() > 0) {
+        if (source.getTieLineCount() > 0) {
             throw new UnsupportedOperationException(
-                    "HVDC lines are not supported yet (" + source.getHvdcLineCount() + " found).");
-        }
-        if (source.getStaticVarCompensatorCount() > 0) {
-            throw new UnsupportedOperationException(
-                    "Static var compensators are not supported yet ("
-                            + source.getStaticVarCompensatorCount() + " found).");
-        }
-        if (source.getDanglingLineCount() > 0) {
-            throw new UnsupportedOperationException(
-                    "Dangling lines are not supported yet ("
-                            + source.getDanglingLineCount() + " found).");
-        }
-        if (source.getBatteryCount() > 0) {
-            throw new UnsupportedOperationException(
-                    "Batteries are not supported yet (" + source.getBatteryCount() + " found).");
+                    "Tie lines are not supported yet (" + source.getTieLineCount() + " found).");
         }
     }
 }
