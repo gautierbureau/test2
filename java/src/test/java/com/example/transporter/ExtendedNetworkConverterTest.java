@@ -50,8 +50,8 @@ class ExtendedNetworkConverterTest {
         assertNotNull(target.getBattery("BAT1"));
         assertEquals(source.getStaticVarCompensatorCount(), target.getStaticVarCompensatorCount());
         assertNotNull(target.getStaticVarCompensator("SVC1"));
-        assertEquals(source.getDanglingLineCount(), target.getDanglingLineCount());
-        assertNotNull(target.getDanglingLine("DL1"));
+        assertEquals(source.getBoundaryLineCount(), target.getBoundaryLineCount());
+        assertNotNull(target.getBoundaryLine("DL1"));
         assertEquals(source.getShuntCompensatorCount(), target.getShuntCompensatorCount());
         assertEquals(ShuntCompensatorModelType.NON_LINEAR,
                 target.getShuntCompensator("SHNL1").getModelType());
@@ -64,8 +64,8 @@ class ExtendedNetworkConverterTest {
         assertEquals(source.getTieLineCount(), target.getTieLineCount());
         TieLine tie = target.getTieLine("TIE1");
         assertNotNull(tie, "tie line should be re-paired");
-        assertEquals("DLT_A", tie.getDanglingLine1().getId());
-        assertEquals("DLT_B", tie.getDanglingLine2().getId());
+        assertEquals("DLT_A", tie.getBoundaryLine1().getId());
+        assertEquals("DLT_B", tie.getBoundaryLine2().getId());
         assertEquals(source.getThreeWindingsTransformerCount(),
                 target.getThreeWindingsTransformerCount());
         assertNotNull(target.getThreeWindingsTransformer("T3W"));

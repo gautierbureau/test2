@@ -111,8 +111,9 @@ modifications. The transformation is purely topological, so a load flow on the
 result matches the original bus-for-bus.
 
 Supported equipment: generators (min/max or curve reactive limits), loads,
-batteries, static var compensators, dangling lines, VSC and LCC converter
-stations (all reconnected as injection bays); lines, two- and three-winding
+batteries, static var compensators, boundary lines (the type powsybl 7.3
+renamed from "dangling line"), VSC and LCC converter stations (all reconnected
+as injection bays); lines, two- and three-winding
 transformers with their ratio/phase tap changers and current limits; HVDC
 lines; tie lines; linear/non-linear shunts; and bus couplers (mapped to
 breakers between busbars). The only connectable type still unhandled is
@@ -134,7 +135,26 @@ java -cp target/curve-transporter-1.0.0-shaded.jar \
 
 `--validate` runs an AC load flow on both networks and reports the maximum bus
 voltage/angle deviation (≈1e-4 kV / 1e-4 deg on IEEE-14; ≈1e-3 kV / 1e-2 deg on
-the extended network, where the SVC control loop adds a little solver noise).
+the extended network, where the SVC control loop adds a little solver noise). It
+tries a flat (uniform) start first and falls back to a DC-based start if either
+load flow fails to converge — a large node-breaker graph can trip a flat start
+where the bus-breaker one held.
+
+### Scale
+
+The converter has been exercised well beyond IEEE-14. Feed it any bus-breaker
+`.xiidm` (for example a MATPOWER/PEGASE case exported through pypowsybl):
+
+| network        | buses → busbar sections | validate (max ΔV / Δangle) |
+|----------------|-------------------------|----------------------------|
+| IEEE-118       | 118                     | 2.7e-3 kV / 2.3e-2 deg     |
+| IEEE-300       | 300                     | 5.8e-3 kV / 9.6e-3 deg     |
+| case1354pegase | 1 354                   | 4.3e-6 kV / 4.3e-3 deg     |
+| case2869pegase | 2 869                   | 4.0e-7 kV / 3.0e-4 deg     |
+| case9241pegase | 9 241                   | 2.3e-6 kV / 6.1e-4 deg *   |
+
+`*` case9241pegase needs the DC-start fallback to converge; the network itself
+is electrically identical either way.
 
 The three-winding transformer is the one type powsybl has no ready-made feeder
 bay for, so the converter builds each of its three bays by hand (a disconnector
@@ -143,9 +163,10 @@ to the busbar plus a series breaker per leg); every other type goes through
 
 ## Dependencies
 
-- powsybl-core 7.1.1 (IIDM model + serde)
-- powsybl-open-loadflow 2.1.1 (validation only)
-- powsybl-ieee-cdf-converter 7.1.1 (IEEE-14 demo network)
+- powsybl-core 7.3.0 (IIDM model + serde; reads IIDM up to schema 1.17, so it
+  ingests pypowsybl's default 1.16 exports directly)
+- powsybl-open-loadflow 2.3.0 (validation only)
+- powsybl-ieee-cdf-converter 7.3.0 (IEEE-14 demo network)
 - commons-math3 3.6.1 (complex arithmetic)
 - picocli 4.7.6 (CLI)
 - slf4j 2.0.13
