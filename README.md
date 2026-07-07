@@ -97,6 +97,45 @@ python3 transport_curve.py \
 
 See `python/transport_curve.py` and `java/README.md` for details.
 
+## Load-flow-based current limit sets
+
+`python/add_current_limits.py` fills in the operational **current limits** that
+many cases ship without — the PEGASE snapshots are the usual example. It runs an
+AC load flow, reads the current that actually flows through each branch side, and
+sizes a complete IIDM operational-limit group (a "current limits set") around it:
+one permanent limit (PATL) plus a configurable ladder of temporary limits
+(TATL), each with its own acceptable duration ("temporisation").
+
+Sizing is **per side**, because the amperage on the two ends of a transformer
+differs by the voltage ratio — a current limit is only meaningful next to the
+current it bounds. For a side carrying `I` amps:
+
+```
+permanent          value = I * permanent_margin        duration = -1 (∞)
+temporary tier k   value = permanent * tier_margin_k   duration = tier_seconds_k
+```
+
+With the defaults (`permanent_margin=1.25`, tiers `1200s:1.10, 600s:1.20,
+60s:1.40`) a branch loaded to `I` in the base case sits at exactly 80 %
+(`1 / 1.25`) of its permanent limit, with temporary steps above it. The set is
+stored as a named operational-limit group and selected as the branch's active
+group; existing groups are left untouched (use `--only-missing` to skip branches
+that already carry limits).
+
+Handles lines, two- and three-winding transformers and boundary (dangling)
+lines; sides with no usable flow (disconnected / near-zero current) are skipped.
+Validated on IEEE-14/118/300 and on a real PEGASE-1354 case (3968 branch sides
+sized; base-case loading peaks at 80 % of the permanent limit, no overloads).
+
+```
+cd python
+pip install -r requirements.txt
+python3 add_current_limits.py --builtin ieee300 --validate
+python3 add_current_limits.py -i case1354pegase.mat -o out.xiidm --validate
+python3 add_current_limits.py -i case.xiidm --permanent-margin 1.3 \
+        --tiers 1200:1.10,600:1.20,60:1.40 --group-name LOADFLOW_BASED -o out.xiidm
+```
+
 ## Method (per-unit, on HV side)
 
 ```
