@@ -2,6 +2,8 @@ package com.example.transporter;
 
 import com.powsybl.iidm.network.Generator;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.extensions.ActivePowerControl;
+import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
@@ -41,6 +43,29 @@ class EquivalentBuilderTest {
         assertNotNull(network.getGenerator("GEN_LV"));
         assertNotNull(network.getLoad("AUX_LOAD"));
         assertNotNull(network.getTwoWindingsTransformer("TX"));
+    }
+
+    /** The original generator's active-power-control extension is carried onto the equivalent. */
+    @Test
+    void testActivePowerControlCarriedOver() {
+        network.getGenerator("GEN_LV").newExtension(ActivePowerControlAdder.class)
+                .withParticipate(true).withDroop(4.5).withParticipationFactor(120.0).add();
+
+        EquivalentBuilder.build(network, "GEN_LV", "TX", "AUX_LOAD", "GEN_HV_EQ", 11);
+
+        ActivePowerControl<Generator> apc = network.getGenerator("GEN_HV_EQ")
+                .getExtension(ActivePowerControl.class);
+        assertNotNull(apc, "activePowerControl must be carried onto the equivalent generator");
+        assertTrue(apc.isParticipate());
+        assertEquals(4.5, apc.getDroop(), 1e-9);
+        assertEquals(120.0, apc.getParticipationFactor(), 1e-9);
+    }
+
+    /** With no extension on the original, the equivalent gets none (no spurious default). */
+    @Test
+    void testNoActivePowerControlWhenOriginalHasNone() {
+        EquivalentBuilder.build(network, "GEN_LV", "TX", "AUX_LOAD", "GEN_HV_EQ", 11);
+        assertNull(network.getGenerator("GEN_HV_EQ").getExtension(ActivePowerControl.class));
     }
 
     /**

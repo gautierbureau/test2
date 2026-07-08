@@ -3,13 +3,17 @@ package com.example.transporter;
 import com.powsybl.iidm.modification.topology.CreateFeederBayBuilder;
 import com.powsybl.iidm.modification.topology.RemoveFeederBay;
 import com.powsybl.iidm.network.*;
+import com.powsybl.iidm.network.extensions.ActivePowerControl;
+import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -205,6 +209,20 @@ public final class EquivalentBuilder {
                 : null;
         double nomHv = op.nomHvKv();
 
+        // Capture each original generator's active-power-control participation so
+        // it can be carried onto the equivalent - the original is about to be
+        // removed. (min/max target P are left out: they are absolute MW bounds on
+        // the LV machine and would need transporting to the HV equivalent.)
+        Map<String, ApcData> apcByGen = new HashMap<>();
+        for (GeneratorSpec spec : specs) {
+            ActivePowerControl<Generator> apc = network.getGenerator(spec.generatorId())
+                    .getExtension(ActivePowerControl.class);
+            if (apc != null) {
+                apcByGen.put(spec.generatorId(), new ApcData(
+                        apc.isParticipate(), apc.getDroop(), apc.getParticipationFactor()));
+            }
+        }
+
         // Remove originals: each generator, its aux load (if any), then the shared transformer.
         LOGGER.info("Removing {} original LV generator(s) + aux load(s) + transformer {}",
                 specs.size(), transformerId);
@@ -257,6 +275,16 @@ public final class EquivalentBuilder {
             }
             curveAdder.add();
 
+            // Carry the original generator's active-power-control extension over.
+            ApcData apc = apcByGen.get(data.spec.generatorId());
+            if (apc != null) {
+                newGen.newExtension(ActivePowerControlAdder.class)
+                        .withParticipate(apc.participate())
+                        .withDroop(apc.droop())
+                        .withParticipationFactor(apc.participationFactor())
+                        .add();
+            }
+
             LOGGER.info("Equivalent {} built from {}: P=[{} ; {}] MW, target P={} MW, target Q={} MVar",
                     data.spec.newGeneratorId(), data.spec.generatorId(),
                     data.pMinEq, data.pMaxEq, data.opHv.pHvMw(), data.opHv.qHvMvar());
@@ -265,6 +293,10 @@ public final class EquivalentBuilder {
         }
 
         return new MultiBuildResult(results);
+    }
+
+    /** Active-power-control participation carried from an original generator. */
+    private record ApcData(boolean participate, double droop, double participationFactor) {
     }
 
     /** Per-generator transport results captured before any network mutation. */

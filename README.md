@@ -230,3 +230,10 @@ giving (P_hv, Qmin_hv, Qmax_hv).
 The per-unit formulation eliminates the line-to-line vs line-to-neutral
 sqrt(3) ambiguity that bites you if you try the math directly in physical
 units.
+
+The transporter works in place (it removes the LV generator, aux load and
+transformer and adds the HV equivalent, leaving the rest of the network
+untouched), and it **carries each original generator's `activePowerControl`
+extension onto its equivalent** so distributed slack / redispatch still sees the
+unit. Both the Python (`transport_curve.py`) and Java (`EquivalentBuilder`)
+implementations do this.

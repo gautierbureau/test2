@@ -752,6 +752,12 @@ def build_equivalent_network_multi(
         bbs_node = None
         next_node = None
 
+    # Carry each original generator's active-power-control participation onto its
+    # equivalent (min/max target P are left out - they are absolute MW bounds on
+    # the LV machine that would need transporting to the HV equivalent).
+    apc = original.get_extensions("activePowerControl")
+    apc_by_gen = {} if apc.empty else {gid: apc.loc[gid] for gid in apc.index}
+
     curves: list[pd.DataFrame] = []
     for spec, (curve, p_op_hv, q_op_hv) in zip(specs, per_gen):
         p_min_eq = float(curve["p"].min())
@@ -795,6 +801,13 @@ def build_equivalent_network_multi(
             min_q=curve_sorted["min_q"].tolist(),
             max_q=curve_sorted["max_q"].tolist(),
         )
+        row = apc_by_gen.get(spec.generator_id)
+        if row is not None:
+            eq.create_extensions(
+                "activePowerControl", id=[spec.new_generator_id],
+                participate=[bool(row["participate"])], droop=[float(row["droop"])],
+                participation_factor=[float(row["participation_factor"])],
+            )
         curves.append(curve)
 
     return eq, curves
