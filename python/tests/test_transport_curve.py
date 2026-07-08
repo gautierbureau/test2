@@ -172,6 +172,25 @@ class TestEquivalentNetworkIntegration:
         assert "TX"       not in txs.index,   "Transformer must be removed"
         assert "GEN_HV_EQ" in gens.index,     "Equivalent generator must exist"
 
+    def test_active_power_control_carried_over(self):
+        original = build_test_network()
+        original.create_extensions("activePowerControl", id=["GEN_LV"],
+                                   participate=[True], droop=[4.5],
+                                   participation_factor=[120.0])
+        eq, _ = build_equivalent_network(original, "GEN_LV", "TX", "AUX_LOAD",
+                                         new_gen_id="GEN_HV_EQ", n_samples=11)
+        ext = eq.get_extensions("activePowerControl")
+        assert "GEN_HV_EQ" in ext.index
+        assert bool(ext.loc["GEN_HV_EQ", "participate"]) is True
+        assert ext.loc["GEN_HV_EQ", "droop"] == 4.5
+        assert ext.loc["GEN_HV_EQ", "participation_factor"] == 120.0
+
+    def test_no_active_power_control_when_original_has_none(self):
+        original = build_test_network()
+        eq, _ = build_equivalent_network(original, "GEN_LV", "TX", "AUX_LOAD",
+                                         new_gen_id="GEN_HV_EQ", n_samples=11)
+        assert eq.get_extensions("activePowerControl").empty
+
     def test_equivalent_load_flow_converges(self):
         original = build_test_network()
         eq, _ = build_equivalent_network(original, "GEN_LV", "TX", "AUX_LOAD",

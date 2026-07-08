@@ -352,3 +352,8 @@ strips signed-JAR signatures, and produces a single self-contained jar.
   step ratio.
 - **Auxiliary load model.** Constant PQ. For ZIP loads, evaluate
   `P_aux(V_lv)` and `Q_aux(V_lv)` before calling `transport`.
+- **Active power control.** Each original generator's `activePowerControl`
+  extension (participate / droop / participation factor) is carried onto its
+  equivalent, so redispatch / distributed slack still sees the unit. Its
+  min/max target P bounds are not carried (they are LV-scale MW values that
+  would need transporting).
