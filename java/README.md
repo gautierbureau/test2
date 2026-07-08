@@ -95,7 +95,8 @@ curve-transporter/
     ├── CurveTransporter.java           sweep across the original P range
     ├── EquivalentBuilder.java          mutate the network in place
     ├── Main.java                       picocli CLI entry point
-    ├── BusToNodeBreakerConverter.java  bus-breaker → node-breaker converter
+    ├── BusToNodeBreakerConverter.java  bus-breaker → node-breaker converter (rebuild)
+    ├── InPlaceNodeBreakerConverter.java  prototype: same conversion by moving feeders
     ├── ExtendedIeee14Factory.java      IEEE-14 grown with extra equipment types
     ├── ConvertToNodeBreaker.java       picocli CLI for the converter
     ├── CurrentLimitsGenerator.java     load-flow-based current limit sets
@@ -190,6 +191,31 @@ The three-winding transformer is the one type powsybl has no ready-made feeder
 bay for, so the converter builds each of its three bays by hand (a disconnector
 to the busbar plus a series breaker per leg); every other type goes through
 `CreateFeederBay` / `CreateBranchFeederBays`.
+
+### Prototype: in-place conversion by moving feeders
+
+`BusToNodeBreakerConverter` **rebuilds** the network from scratch, so anything
+attached to an element that it does not explicitly re-create is dropped (the
+reason operational limits and extensions had to be copied by hand, above).
+
+`InPlaceNodeBreakerConverter` is a prototype of a fundamentally different, and
+cleaner, approach: it never destroys a connectable. It creates a node-breaker
+voltage level per bus-breaker one, then **moves** each feeder onto its busbar
+section with powsybl's `MoveFeederBay` modification, re-creates bus couplers as
+coupling devices, and removes the emptied voltage levels. Because the
+connectables are moved rather than rebuilt, **every piece of data on them
+survives automatically** — limit groups and their selection, all extensions,
+properties, aliases, reactive limits, tap changers — with *no* per-attribute
+copy code. Validated on the extended IEEE-14 (limits, `activePowerControl`, a
+property and an alias all preserved, HVDC/tie line/3-winding transformer intact,
+load flow unchanged) and on IEEE-300.
+
+This is the shape the conversion would ideally take upstream in powsybl-core (a
+`NetworkModification` that moves feeders). Its prototype limitations: one busbar
+section per bus (no sectionalizing / one-busbar-per-generator options), and
+node-breaker voltage levels take a new id (`_NB` suffix) because IIDM fixes a
+voltage level's topology kind at creation and cannot rename — so the *containers*
+change id while every *connectable* keeps its id and data.
 
 ## Load-flow-based current limit sets
 
