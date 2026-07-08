@@ -210,9 +210,13 @@ copy code. Validated on the extended IEEE-14 (limits, `activePowerControl`, a
 property and an alias all preserved, HVDC/tie line/3-winding transformer intact,
 load flow unchanged) and on IEEE-300.
 
+It has the **same busbar-layout options** as the rebuild converter —
+`convert(network, busbarSectionsPerBus, oneBusbarPerGenerator)` with the same
+decoupled counts (one section per generator on generator buses, N sections on
+the rest), sections chained by closed coupling devices.
+
 This is the shape the conversion would ideally take upstream in powsybl-core (a
-`NetworkModification` that moves feeders). Its prototype limitations: one busbar
-section per bus (no sectionalizing / one-busbar-per-generator options), and
+`NetworkModification` that moves feeders). Its one prototype limitation:
 node-breaker voltage levels take a new id (`_NB` suffix) because IIDM fixes a
 voltage level's topology kind at creation and cannot rename — so the *containers*
 change id while every *connectable* keeps its id and data.

@@ -5,6 +5,7 @@ import com.powsybl.iidm.modification.topology.MoveFeederBayBuilder;
 import com.powsybl.iidm.modification.topology.RemoveVoltageLevelBuilder;
 import com.powsybl.iidm.network.Bus;
 import com.powsybl.iidm.network.Connectable;
+import com.powsybl.iidm.network.Generator;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.Substation;
 import com.powsybl.iidm.network.Switch;
@@ -16,10 +17,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Prototype bus-breaker to node-breaker converter that works <b>in place</b> by
@@ -38,21 +38,25 @@ import java.util.Set;
  * <p>The recipe:
  * <ol>
  *   <li>For each bus-breaker voltage level, create a sibling node-breaker
- *   voltage level in the same substation with one busbar section per bus.</li>
- *   <li>Move every feeder terminal onto its bus's new busbar section
+ *   voltage level in the same substation with the wanted busbar sections per
+ *   bus, chained by closed coupling devices.</li>
+ *   <li>Move every feeder terminal onto a busbar section of its bus
  *   ({@code MoveFeederBay} builds the disconnector + breaker bay).</li>
  *   <li>Re-create bus couplers as coupling devices between the busbar sections.</li>
  *   <li>Remove the now-empty bus-breaker voltage levels.</li>
  * </ol>
  *
- * <p><b>Prototype scope / known limitations.</b> This is a proof of concept for
- * the "move, don't rebuild" approach: it creates one busbar section per bus (no
- * sectionalizing / one-busbar-per-generator options), and node-breaker voltage
- * levels take a new id ({@value #NB_SUFFIX} suffix) because IIDM fixes a voltage
- * level's topology kind at creation and offers no rename - so the <em>containers</em>
- * (voltage levels, busbar sections) are new while every <em>connectable</em>
- * keeps its id and data. Substation ids are preserved. Voltage levels without a
- * substation and open coupler switches are not handled.
+ * <p>The busbar layout matches {@link BusToNodeBreakerConverter}: the two counts
+ * are decoupled, so a bus hosting generators gets one section per generator
+ * (when {@code oneBusbarPerGenerator}) while buses without generators get
+ * {@code busbarSectionsPerBus} sections.
+ *
+ * <p><b>Prototype limitation.</b> Node-breaker voltage levels take a new id
+ * ({@value #NB_SUFFIX} suffix) because IIDM fixes a voltage level's topology
+ * kind at creation and offers no rename - so the <em>containers</em> (voltage
+ * levels, busbar sections) are new while every <em>connectable</em> keeps its id
+ * and data. Substation ids are preserved. Voltage levels without a substation
+ * and open coupler switches are not handled.
  */
 public final class InPlaceNodeBreakerConverter {
 
@@ -69,8 +73,23 @@ public final class InPlaceNodeBreakerConverter {
     private record Coupler(String bbs1, String bbs2, String switchPrefix) {
     }
 
-    /** Convert {@code network} to node-breaker in place; the same instance is returned. */
+    /** Convert to node-breaker in place with one busbar section per generator / bus. */
     public static Network convert(Network network) {
+        return convert(network, 1, true);
+    }
+
+    /**
+     * Convert {@code network} to node-breaker in place; the same instance is returned.
+     *
+     * @param busbarSectionsPerBus busbar sections for buses without generators ({@code >= 1})
+     * @param oneBusbarPerGenerator when {@code true}, a generator bus gets one section per generator
+     */
+    public static Network convert(Network network, int busbarSectionsPerBus,
+                                  boolean oneBusbarPerGenerator) {
+        if (busbarSectionsPerBus < 1) {
+            throw new IllegalArgumentException(
+                    "busbarSectionsPerBus must be >= 1, got " + busbarSectionsPerBus);
+        }
         List<VoltageLevel> busBreakerVls = new ArrayList<>();
         for (VoltageLevel vl : network.getVoltageLevels()) {
             if (vl.getTopologyKind() == TopologyKind.BUS_BREAKER) {
@@ -81,11 +100,22 @@ public final class InPlaceNodeBreakerConverter {
             throw new IllegalArgumentException("network has no bus-breaker voltage level to convert");
         }
 
-        Map<String, String> busToBbs = new HashMap<>();       // bus id -> new busbar section id
-        Map<String, String> vlToNbVl = new HashMap<>();       // old VL id -> new node-breaker VL id
-        List<Coupler> couplers = new ArrayList<>();
+        Map<String, Integer> gensPerBus = new HashMap<>();
+        if (oneBusbarPerGenerator) {
+            for (Generator g : network.getGenerators()) {
+                Bus b = g.getTerminal().getBusBreakerView().getConnectableBus();
+                if (b != null) {
+                    gensPerBus.merge(b.getId(), 1, Integer::sum);
+                }
+            }
+        }
 
-        // 1. Create a node-breaker sibling voltage level with one busbar per bus.
+        BusbarPlan plan = new BusbarPlan();
+        Map<String, String> vlToNbVl = new HashMap<>();       // old VL id -> new node-breaker VL id
+        List<Coupler> intraBusChains = new ArrayList<>();      // sections of one bus, chained closed
+        List<Coupler> busCouplers = new ArrayList<>();         // original bus-breaker couplers
+
+        // 1. Create a node-breaker sibling voltage level with the wanted busbars.
         for (VoltageLevel vl : busBreakerVls) {
             Substation substation = vl.getSubstation().orElseThrow(() ->
                     new UnsupportedOperationException(
@@ -101,27 +131,41 @@ public final class InPlaceNodeBreakerConverter {
                     .add();
             int node = 0;
             for (Bus bus : vl.getBusBreakerView().getBuses()) {
-                String bbsId = bus.getId() + BBS_SUFFIX;
-                nb.getNodeBreakerView().newBusbarSection().setId(bbsId).setNode(node++).add();
-                busToBbs.put(bus.getId(), bbsId);
+                int count = sectionCount(bus.getId(), busbarSectionsPerBus, oneBusbarPerGenerator,
+                        gensPerBus);
+                String prev = null;
+                for (int k = 0; k < count; k++) {
+                    String bbsId = bus.getId() + BBS_SUFFIX + (count > 1 ? "_" + (k + 1) : "");
+                    nb.getNodeBreakerView().newBusbarSection().setId(bbsId).setNode(node++).add();
+                    plan.register(bus.getId(), bbsId);
+                    if (prev != null) {
+                        intraBusChains.add(new Coupler(prev, bbsId, bbsId + "_LINK_"));
+                    }
+                    prev = bbsId;
+                }
             }
-            // Remember couplers (bus-breaker switches) to re-create after the move.
+            // Remember bus couplers (bus-breaker switches) to re-create after the move.
             for (Switch sw : vl.getBusBreakerView().getSwitches()) {
                 Bus b1 = vl.getBusBreakerView().getBus1(sw.getId());
                 Bus b2 = vl.getBusBreakerView().getBus2(sw.getId());
-                couplers.add(new Coupler(b1.getId() + BBS_SUFFIX, b2.getId() + BBS_SUFFIX,
-                        sw.getId() + "_"));
+                busCouplers.add(new Coupler(b1.getId(), b2.getId(), sw.getId() + "_"));
             }
         }
 
-        // 2. Plan every feeder move up front (bus-breaker views are still valid),
+        // 2. Chain the sections of each bus with closed coupling devices, so a
+        //    multi-section bus stays one electrical node.
+        for (Coupler c : intraBusChains) {
+            applyCoupling(network, c.bbs1(), c.bbs2(), c.switchPrefix());
+        }
+
+        // 3. Plan every feeder move up front (bus-breaker views are still valid),
         //    then apply - so we never read a terminal we have already relocated.
-        Set<String> converting = vlToNbVl.keySet();
         List<Move> moves = new ArrayList<>();
         for (Connectable<?> connectable : network.getConnectables()) {
+            boolean generator = connectable instanceof Generator;
             for (Terminal terminal : connectable.getTerminals()) {
                 VoltageLevel vl = terminal.getVoltageLevel();
-                if (!converting.contains(vl.getId())) {
+                if (!vlToNbVl.containsKey(vl.getId())) {
                     continue;
                 }
                 Bus bus = terminal.getBusBreakerView().getConnectableBus();
@@ -130,7 +174,7 @@ public final class InPlaceNodeBreakerConverter {
                             "terminal of " + connectable.getId() + " has no connectable bus");
                 }
                 moves.add(new Move(connectable.getId(), terminal,
-                        vlToNbVl.get(vl.getId()), busToBbs.get(bus.getId())));
+                        vlToNbVl.get(vl.getId()), plan.pick(bus.getId(), generator)));
             }
         }
         for (Move m : moves) {
@@ -143,23 +187,63 @@ public final class InPlaceNodeBreakerConverter {
                     .apply(network);
         }
 
-        // 3. Re-create bus couplers as coupling devices between busbar sections.
-        for (Coupler c : couplers) {
-            new CreateCouplingDeviceBuilder()
-                    .withBusOrBusbarSectionId1(c.bbs1())
-                    .withBusOrBusbarSectionId2(c.bbs2())
-                    .withSwitchPrefixId(c.switchPrefix())
-                    .build()
-                    .apply(network);
+        // 4. Re-create bus couplers as coupling devices between the buses' first sections.
+        for (Coupler c : busCouplers) {
+            applyCoupling(network, plan.first(c.bbs1()), plan.first(c.bbs2()), c.switchPrefix());
         }
 
-        // 4. Remove the now-empty bus-breaker voltage levels.
-        for (String vlId : new HashSet<>(converting)) {
+        // 5. Remove the now-empty bus-breaker voltage levels.
+        for (String vlId : vlToNbVl.keySet()) {
             new RemoveVoltageLevelBuilder().withVoltageLevelId(vlId).build().apply(network);
         }
 
         LOGGER.info("Converted '{}' to node-breaker in place: {} voltage level(s), {} busbar section(s)",
-                network.getId(), network.getVoltageLevelCount(), busToBbs.size());
+                network.getId(), network.getVoltageLevelCount(), plan.total());
         return network;
+    }
+
+    private static int sectionCount(String busId, int busbarSectionsPerBus,
+                                    boolean oneBusbarPerGenerator, Map<String, Integer> gensPerBus) {
+        // A bus hosting generators gets exactly one section per generator;
+        // busbarSectionsPerBus applies only to buses without generators.
+        if (oneBusbarPerGenerator && gensPerBus.getOrDefault(busId, 0) >= 1) {
+            return Math.max(1, gensPerBus.get(busId));
+        }
+        return Math.max(1, busbarSectionsPerBus);
+    }
+
+    private static void applyCoupling(Network network, String bbs1, String bbs2, String prefix) {
+        new CreateCouplingDeviceBuilder()
+                .withBusOrBusbarSectionId1(bbs1)
+                .withBusOrBusbarSectionId2(bbs2)
+                .withSwitchPrefixId(prefix)
+                .build()
+                .apply(network);
+    }
+
+    /** Busbar sections of each bus and the round-robin cursors that place feeders. */
+    private static final class BusbarPlan {
+        private final Map<String, List<String>> sections = new LinkedHashMap<>();
+        private final Map<String, Integer> genCursor = new HashMap<>();
+        private final Map<String, Integer> feederCursor = new HashMap<>();
+
+        void register(String busId, String bbsId) {
+            sections.computeIfAbsent(busId, k -> new ArrayList<>()).add(bbsId);
+        }
+
+        String pick(String busId, boolean generator) {
+            List<String> secs = sections.get(busId);
+            Map<String, Integer> cursor = generator ? genCursor : feederCursor;
+            int i = cursor.merge(busId, 1, Integer::sum) - 1;
+            return secs.get(i % secs.size());
+        }
+
+        String first(String busId) {
+            return sections.get(busId).get(0);
+        }
+
+        int total() {
+            return sections.values().stream().mapToInt(List::size).sum();
+        }
     }
 }
