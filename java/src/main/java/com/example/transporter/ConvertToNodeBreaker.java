@@ -2,6 +2,7 @@ package com.example.transporter;
 
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Bus;
+import com.powsybl.iidm.network.Generator;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.VoltageLevel;
 import com.powsybl.iidm.serde.ExportOptions;
@@ -75,8 +76,14 @@ public class ConvertToNodeBreaker implements Callable<Integer> {
                     + "section on buses that host more than one generator.")
     private boolean noGeneratorBusbars;
 
+    @Option(names = {"--in-place"},
+            description = "Convert by moving feeders in place (InPlaceNodeBreakerConverter) "
+                    + "instead of rebuilding. Preserves limits, extensions, properties and "
+                    + "aliases automatically; node-breaker voltage levels take a '_NB' id.")
+    private boolean inPlace;
+
     @Option(names = {"--validate"},
-            description = "Run an AC load flow on both networks and compare bus voltages.")
+            description = "Run an AC load flow and check the converted network matches.")
     private boolean validate;
 
     @Override
@@ -90,16 +97,24 @@ public class ConvertToNodeBreaker implements Callable<Integer> {
                     source.getId(), source.getVoltageLevelCount(),
                     source.getGeneratorCount(), source.getLoadCount());
 
-            Network target = BusToNodeBreakerConverter.convert(
-                    source, busbarsPerBus, !noGeneratorBusbars);
+            // The in-place converter mutates the source, so snapshot the
+            // reference solution before converting.
+            Map<String, Double> reference = (validate && inPlace)
+                    ? referenceGeneratorVoltages(source) : null;
 
-            System.out.printf("Converted '%s' to node-breaker: %d busbar section(s) "
+            Network target = inPlace
+                    ? InPlaceNodeBreakerConverter.convert(source, busbarsPerBus, !noGeneratorBusbars)
+                    : BusToNodeBreakerConverter.convert(source, busbarsPerBus, !noGeneratorBusbars);
+
+            System.out.printf("Converted '%s' to node-breaker (%s): %d busbar section(s) "
                             + "over %d voltage level(s).%n",
-                    target.getId(), target.getBusbarSectionCount(),
-                    target.getVoltageLevelCount());
+                    target.getId(), inPlace ? "in place" : "rebuild",
+                    target.getBusbarSectionCount(), target.getVoltageLevelCount());
 
             if (validate) {
-                boolean ok = validate(source, target);
+                boolean ok = inPlace
+                        ? validateInPlace(target, reference)
+                        : validate(source, target);
                 if (!ok) {
                     System.err.println("Validation FAILED: converted network is not "
                             + "electrically equivalent.");
@@ -224,6 +239,69 @@ public class ConvertToNodeBreaker implements Callable<Integer> {
         for (VoltageLevel vl : net.getVoltageLevels()) {
             for (Bus bus : vl.getBusView().getBuses()) {
                 out.put(vl.getId(), new double[]{bus.getV(), bus.getAngle()});
+            }
+        }
+        return out;
+    }
+
+    /**
+     * In-place validation: the conversion mutates the network and renames its
+     * voltage levels, so we compare per-generator bus voltage against a
+     * reference solution captured before the conversion (generators keep their
+     * ids). Angles are not comparable across the topology change, so only the
+     * magnitude is checked.
+     */
+    private Map<String, Double> referenceGeneratorVoltages(Network net) {
+        runWithFallback(net);
+        return generatorVoltages(net);
+    }
+
+    private boolean validateInPlace(Network converted, Map<String, Double> reference) {
+        System.out.println();
+        System.out.println("=".repeat(64));
+        System.out.println("Validation load flow (in-place: before vs. after)");
+        System.out.println("=".repeat(64));
+        LoadFlowResult lf = runWithFallback(converted);
+        System.out.printf("Converted : %s%n", lf.isFullyConverged() ? "CONVERGED" : "NOT CONVERGED");
+        if (!lf.isFullyConverged()) {
+            return false;
+        }
+        Map<String, Double> after = generatorVoltages(converted);
+        double maxDv = 0.0;
+        for (Map.Entry<String, Double> e : reference.entrySet()) {
+            Double a = after.get(e.getKey());
+            if (a != null) {
+                maxDv = Math.max(maxDv, Math.abs(e.getValue() - a));
+            }
+        }
+        System.out.printf("Max |dV| : %.3e kV (per generator)%n", maxDv);
+        return maxDv < 1e-2;
+    }
+
+    private static LoadFlowResult runWithFallback(Network net) {
+        LoadFlowResult result = null;
+        for (LoadFlowParameters.VoltageInitMode init : new LoadFlowParameters.VoltageInitMode[]{
+                LoadFlowParameters.VoltageInitMode.UNIFORM_VALUES,
+                LoadFlowParameters.VoltageInitMode.DC_VALUES}) {
+            LoadFlowParameters params = new LoadFlowParameters()
+                    .setUseReactiveLimits(true)
+                    .setTransformerVoltageControlOn(false)
+                    .setDistributedSlack(true)
+                    .setVoltageInitMode(init);
+            result = LoadFlow.run(net, params);
+            if (result.isFullyConverged()) {
+                return result;
+            }
+        }
+        return result;
+    }
+
+    private static Map<String, Double> generatorVoltages(Network net) {
+        Map<String, Double> out = new LinkedHashMap<>();
+        for (Generator g : net.getGenerators()) {
+            Bus bus = g.getTerminal().getBusView().getBus();
+            if (bus != null) {
+                out.put(g.getId(), bus.getV());
             }
         }
         return out;

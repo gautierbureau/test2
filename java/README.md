@@ -140,7 +140,14 @@ java -cp target/curve-transporter-1.0.0-shaded.jar \
 #                     ratio/phase tap changers, 3-winding transformer, VSC HVDC,
 #                     LCC HVDC, a tie line and a bus coupler
 # --input path/to/bus_breaker.xiidm -o out.xiidm --validate
+# --in-place        : convert by moving feeders instead of rebuilding
+#                     (preserves limits/extensions/properties/aliases for free;
+#                      node-breaker voltage levels get a '_NB' id)
 ```
+
+With `--in-place` the validation reports `Max |dV| : 0.000e+00 kV` — moving the
+original connectables reproduces the load flow exactly, where the rebuild path
+shows a little solver round-off from the re-created elements.
 
 ### Busbar layout options
 
