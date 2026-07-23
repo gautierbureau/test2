@@ -184,6 +184,37 @@ def test_apparent_power_limits_alongside_current():
         assert report["max_loading"] == pytest.approx(1 / DEFAULT_PERMANENT_MARGIN, abs=1e-6)
 
 
+def test_seasonal_limit_groups():
+    net = pn.create_ieee14()
+    stats = add_current_limits(
+        net, seasons={"WINTER": 1.1, "SUMMER": 0.9}, selected_season="SUMMER")
+    assert stats["groups"] == ["WINTER", "SUMMER"]
+    assert stats["group_name"] == "SUMMER"          # active
+
+    ol = net.get_operational_limits(show_inactive_sets=True)
+    assert set(ol.index.get_level_values("group_name")) == {"WINTER", "SUMMER"}
+    # Winter rating is higher than summer by the scale ratio.
+    winter = ol.xs(("L1-2-1", "ONE", "CURRENT", -1, "WINTER"))["value"]
+    summer = ol.xs(("L1-2-1", "ONE", "CURRENT", -1, "SUMMER"))["value"]
+    assert winter / summer == pytest.approx(1.1 / 0.9)
+
+    # The selected (summer) group is active on the branches.
+    sel = net.get_lines(attributes=["selected_limits_group_1"])
+    assert set(sel["selected_limits_group_1"]) == {"SUMMER"}
+    # Base case loads the summer group at 0.8 / 0.9 (higher than unscaled).
+    report = loading_report(net, group_name="SUMMER", run_loadflow=False)
+    assert report["max_loading"] == pytest.approx((1 / DEFAULT_PERMANENT_MARGIN) / 0.9, abs=1e-6)
+    assert report["overloaded"] == 0
+
+
+def test_seasons_reject_bad_selection():
+    net = pn.create_ieee14()
+    with pytest.raises(ValueError):
+        add_current_limits(net, seasons={"WINTER": 1.1}, selected_season="SPRING")
+    with pytest.raises(ValueError):
+        add_current_limits(net, seasons={"WINTER": -1.0})
+
+
 def test_active_power_limit_type():
     net = pn.create_ieee14()
     add_current_limits(net, limit_types=("ACTIVE_POWER",))
