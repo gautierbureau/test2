@@ -14,6 +14,7 @@ import pytest
 
 from complete_network import (
     add_active_power_control,
+    add_rated_s,
     add_ratio_tap_changers,
     add_reactive_limits,
     set_generator_energy_source,
@@ -201,6 +202,57 @@ def test_active_power_control_rejects_bad_droop():
     net = pn.create_ieee14()
     with pytest.raises(ValueError):
         add_active_power_control(net, droop=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Apparent power ratings (rated_s)
+# ---------------------------------------------------------------------------
+
+def test_rated_s_generator_from_power_factor():
+    net = pn.create_empty("s")
+    net.create_substations(id=["S"])
+    net.create_voltage_levels(id=["VL"], substation_id=["S"],
+                              topology_kind=["BUS_BREAKER"], nominal_v=[100.0])
+    net.create_buses(id=["B"], voltage_level_id=["VL"])
+    net.create_generators(id=["G"], voltage_level_id=["VL"], bus_id=["B"],
+                          min_p=[0.0], max_p=[80.0], target_p=[60.0],
+                          target_v=[100.0], voltage_regulator_on=[True])
+    net.create_loads(id=["L"], voltage_level_id=["VL"], bus_id=["B"], p0=[60.0], q0=[0.0])
+
+    add_rated_s(net, generator_power_factor=0.8, only_missing=False, run_loadflow=False)
+    g = net.get_generators(all_attributes=True)
+    # rated_s = maxP / power_factor = 80 / 0.8 = 100.
+    assert g.loc["G", "rated_s"] == pytest.approx(100.0)
+
+
+def test_rated_s_transformer_from_flow():
+    net = pn.create_ieee14()
+    add_rated_s(net, transformer_loading=0.6)
+    txs = net.get_2_windings_transformers(all_attributes=True)
+    for tid, t in txs.iterrows():
+        s_base = max(math.hypot(t["p1"], t["q1"]), math.hypot(t["p2"], t["q2"]))
+        # The base case loads the transformer at transformer_loading of rated_s.
+        assert t["rated_s"] == pytest.approx(s_base / 0.6)
+        assert s_base / t["rated_s"] == pytest.approx(0.6)
+
+
+def test_rated_s_only_missing():
+    net = pn.create_ieee14()
+    net.update_generators(id=["B1-G"], rated_s=[500.0])
+    stats = add_rated_s(net)
+    assert stats["generators_skipped_existing"] == 1
+    # The pre-set rating is left untouched.
+    assert net.get_generators(all_attributes=True).loc["B1-G", "rated_s"] == 500.0
+
+
+def test_rated_s_rejects_bad_config():
+    net = pn.create_ieee14()
+    with pytest.raises(ValueError):
+        add_rated_s(net, generator_power_factor=0.0)
+    with pytest.raises(ValueError):
+        add_rated_s(net, transformer_loading=0.0)
+    with pytest.raises(ValueError):
+        add_rated_s(net, transformer_loading=1.5)
 
 
 # ---------------------------------------------------------------------------

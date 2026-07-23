@@ -42,6 +42,8 @@ DEFAULT_RTC_STEPS_PER_SIDE = 8
 DEFAULT_RTC_STEP_INCREMENT = 0.0125  # 1.25 % per step -> +/-10 % over 8 steps
 DEFAULT_ENERGY_SOURCE = "THERMAL"
 DEFAULT_DROOP = 4.0  # percent
+DEFAULT_GENERATOR_POWER_FACTOR = 0.85  # rated_s = maxP / power factor
+DEFAULT_TRANSFORMER_LOADING = 0.6  # base-case apparent flow as a share of rated_s
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +309,90 @@ def _participation_factor(g) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Apparent power ratings (rated_s)
+# ---------------------------------------------------------------------------
+
+def add_rated_s(
+    network: pn.Network,
+    generator_power_factor: float = DEFAULT_GENERATOR_POWER_FACTOR,
+    transformer_loading: float = DEFAULT_TRANSFORMER_LOADING,
+    only_missing: bool = True,
+    run_loadflow: bool = True,
+    lf_parameters: Optional[lf.Parameters] = None,
+) -> dict:
+    """Give generators and two-winding transformers an apparent-power rating.
+
+    Real models always carry ``rated_s`` (nameplate MVA); many cases - PEGASE
+    included - omit it, which blocks apparent-power limits and MVA loading.
+
+    - Generators: ``rated_s = |P| / generator_power_factor`` where ``P`` is the
+      active-power capability (``max_p``, falling back to ``target_p``).
+    - Transformers: ``rated_s = S_base / transformer_loading`` where ``S_base``
+      is the larger of the two sides' base-case apparent flow, so the base case
+      loads the transformer at ``transformer_loading`` of its rating.
+
+    The network is modified in place. Returns a summary dict.
+    """
+    if not 0 < generator_power_factor <= 1:
+        raise ValueError("generator_power_factor must be in (0, 1]")
+    if not 0 < transformer_loading <= 1:
+        raise ValueError("transformer_loading must be in (0, 1]")
+    if run_loadflow:
+        _run_ac_or_raise(network, lf_parameters)
+
+    stats = {"generators": 0, "generators_set": 0, "generators_skipped_existing": 0,
+             "generators_unsizable": 0, "transformers": 0, "transformers_set": 0,
+             "transformers_skipped_existing": 0, "transformers_no_flow": 0}
+
+    gens = network.get_generators(all_attributes=True)
+    stats["generators"] = len(gens)
+    gids, gvals = [], []
+    for gid, g in gens.iterrows():
+        if only_missing and math.isfinite(g["rated_s"]) and g["rated_s"] > 0:
+            stats["generators_skipped_existing"] += 1
+            continue
+        p = g["max_p"]
+        if not (math.isfinite(p) and 0 < abs(p) < DEFAULT_PLACEHOLDER_THRESHOLD):
+            p = g["target_p"]
+        if not (math.isfinite(p) and p > 0):
+            stats["generators_unsizable"] += 1
+            continue
+        gids.append(gid)
+        gvals.append(abs(p) / generator_power_factor)
+    if gids:
+        network.update_generators(id=gids, rated_s=gvals)
+        stats["generators_set"] = len(gids)
+
+    txs = network.get_2_windings_transformers(all_attributes=True)
+    stats["transformers"] = len(txs)
+    tids, tvals = [], []
+    for tid, t in txs.iterrows():
+        if only_missing and math.isfinite(t["rated_s"]) and t["rated_s"] > 0:
+            stats["transformers_skipped_existing"] += 1
+            continue
+        s_base = _apparent_flow(t)
+        if s_base is None:
+            stats["transformers_no_flow"] += 1
+            continue
+        tids.append(tid)
+        tvals.append(s_base / transformer_loading)
+    if tids:
+        network.update_2_windings_transformers(id=tids, rated_s=tvals)
+        stats["transformers_set"] = len(tids)
+    return stats
+
+
+def _apparent_flow(tx) -> Optional[float]:
+    """Larger of the two sides' base-case apparent power (MVA), or None."""
+    best = None
+    for p_col, q_col in (("p1", "q1"), ("p2", "q2")):
+        p, q = tx[p_col], tx[q_col]
+        if math.isfinite(p) and math.isfinite(q):
+            best = max(best or 0.0, math.hypot(p, q))
+    return best if best and best > 0 else None
+
+
+# ---------------------------------------------------------------------------
 # Load flow
 # ---------------------------------------------------------------------------
 
@@ -343,8 +429,9 @@ _BUILTINS = {
 def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Fill in missing network data (reactive limits, ratio tap "
-                    "changers, generator energy source, active power control), "
-                    "sized from an AC load flow. With no completion flag, all run.")
+                    "changers, generator energy source, active power control, "
+                    "apparent-power ratings), sized from an AC load flow. With no "
+                    "completion flag, all run.")
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("-i", "--input", help="input network file")
     src.add_argument("--builtin", choices=sorted(_BUILTINS),
@@ -358,6 +445,8 @@ def _main(argv=None) -> int:
                         help="set energy source on generators that have none")
     parser.add_argument("--active-power-control", action="store_true",
                         help="add participation factors for distributed slack")
+    parser.add_argument("--rated-s", action="store_true",
+                        help="estimate apparent-power ratings where missing")
     parser.add_argument("--power-factor", type=float, default=DEFAULT_POWER_FACTOR,
                         help="reactive sizing fallback power factor "
                              f"(default: {DEFAULT_POWER_FACTOR})")
@@ -371,15 +460,24 @@ def _main(argv=None) -> int:
                         help=f"energy source to assign (default: {DEFAULT_ENERGY_SOURCE})")
     parser.add_argument("--droop", type=float, default=DEFAULT_DROOP,
                         help=f"active power control droop percent (default: {DEFAULT_DROOP})")
+    parser.add_argument("--generator-power-factor", type=float,
+                        default=DEFAULT_GENERATOR_POWER_FACTOR,
+                        help="rated_s generator power factor "
+                             f"(default: {DEFAULT_GENERATOR_POWER_FACTOR})")
+    parser.add_argument("--transformer-loading", type=float,
+                        default=DEFAULT_TRANSFORMER_LOADING,
+                        help="base-case transformer loading as a share of rated_s "
+                             f"(default: {DEFAULT_TRANSFORMER_LOADING})")
     args = parser.parse_args(argv)
 
     # With no explicit selection, run every completion.
     selected = (args.reactive_limits or args.ratio_tap_changers
-                or args.energy_source or args.active_power_control)
+                or args.energy_source or args.active_power_control or args.rated_s)
     do_reactive = args.reactive_limits or not selected
     do_taps = args.ratio_tap_changers or not selected
     do_energy = args.energy_source or not selected
     do_apc = args.active_power_control or not selected
+    do_rated_s = args.rated_s or not selected
 
     network = _BUILTINS[args.builtin]() if args.builtin else pn.load(args.input)
     # One load flow shared by all completions.
@@ -405,6 +503,12 @@ def _main(argv=None) -> int:
         a = add_active_power_control(network, droop=args.droop)
         print(f"Active power control: added {a['added']} of {a['generators']} "
               f"generator(s) ({a['skipped_existing']} already had it).")
+    if do_rated_s:
+        s = add_rated_s(network, generator_power_factor=args.generator_power_factor,
+                        transformer_loading=args.transformer_loading, run_loadflow=False)
+        print(f"Rated S: set {s['generators_set']} of {s['generators']} generator(s) and "
+              f"{s['transformers_set']} of {s['transformers']} transformer(s) "
+              f"({s['transformers_no_flow']} transformer(s) had no base-case flow).")
 
     if args.output:
         network.save(args.output, format="XIIDM")
