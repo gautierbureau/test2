@@ -69,6 +69,20 @@ public class AddCurrentLimits implements Callable<Integer> {
             description = "Operational-limit group name (default: ${DEFAULT-VALUE}).")
     private String groupName;
 
+    @Option(names = {"--limit-types"}, paramLabel = "TYPE,...", defaultValue = "CURRENT",
+            description = "Comma-separated limit types to size into the group: "
+                    + "CURRENT,APPARENT_POWER,ACTIVE_POWER (default: ${DEFAULT-VALUE}).")
+    private String limitTypes;
+
+    @Option(names = {"--seasons"}, paramLabel = "NAME:SCALE,...",
+            description = "Create one group per season with scaled limits, "
+                    + "e.g. 'WINTER:1.1,SUMMER:0.9' (default: single group).")
+    private String seasons;
+
+    @Option(names = {"--selected-season"}, paramLabel = "NAME",
+            description = "Season group to make active (default: first).")
+    private String selectedSeason;
+
     @Option(names = {"--no-transformers"},
             description = "Do not size limits on transformers.")
     private boolean noTransformers;
@@ -113,15 +127,21 @@ public class AddCurrentLimits implements Callable<Integer> {
                     .withIncludeBoundaryLines(!noBoundaryLines)
                     .withMinCurrent(minCurrent)
                     .withOnlyMissing(onlyMissing)
-                    .withSelect(!noSelect);
+                    .withSelect(!noSelect)
+                    .withLimitTypes(parseLimitTypes(limitTypes))
+                    .withSeasons(parseSeasons(seasons))
+                    .withSelectedSeason(selectedSeason);
             if (tiers != null) {
                 cfg = cfg.withTemporaryTiers(parseTiers(tiers));
             }
 
             CurrentLimitsGenerator.Stats stats = CurrentLimitsGenerator.apply(network, cfg);
-            System.out.printf("Group '%s': limits on %d branch(es), %d side(s) "
+            String groupsNote = stats.groups().size() > 1
+                    ? " in groups " + stats.groups() + ", active '" + stats.groupName() + "'"
+                    : " '" + stats.groupName() + "'";
+            System.out.printf("Group%s: limits on %d branch(es), %d side(s) "
                             + "(%d permanent + %d temporary).%n",
-                    stats.groupName(), stats.branches(), stats.sides(),
+                    groupsNote, stats.branches(), stats.sides(),
                     stats.permanentLimits(), stats.temporaryLimits());
             if (stats.skippedNoFlow() > 0) {
                 System.out.printf("Skipped %d side(s) with no usable flow.%n", stats.skippedNoFlow());
@@ -132,9 +152,10 @@ public class AddCurrentLimits implements Callable<Integer> {
             }
 
             if (validate) {
-                // The network was already solved by apply()'s load flow.
+                // The network was already solved by apply()'s load flow. Report
+                // against the active group (the selected season, if any).
                 CurrentLimitsGenerator.LoadingReport report =
-                        CurrentLimitsGenerator.loadingReport(network, groupName, false);
+                        CurrentLimitsGenerator.loadingReport(network, stats.groupName(), false);
                 if (report.sides() > 0) {
                     System.out.printf("Base-case loading: %d side(s) checked, max %.1f %% of "
                                     + "permanent limit, %d overloaded.%n",
@@ -202,6 +223,39 @@ public class AddCurrentLimits implements Callable<Integer> {
             }
             parsed.add(new CurrentLimitsGenerator.TemporaryTier(
                     Integer.parseInt(kv[0].trim()), Double.parseDouble(kv[1].trim())));
+        }
+        return parsed;
+    }
+
+    /** Parse "CURRENT,APPARENT_POWER" into a list of limit types. */
+    static List<com.powsybl.iidm.network.LimitType> parseLimitTypes(String text) {
+        List<com.powsybl.iidm.network.LimitType> parsed = new ArrayList<>();
+        for (String part : text.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                parsed.add(com.powsybl.iidm.network.LimitType.valueOf(trimmed));
+            }
+        }
+        return parsed;
+    }
+
+    /** Parse "WINTER:1.1,SUMMER:0.9" into an ordered {season: scale} map (null if empty). */
+    static java.util.Map<String, Double> parseSeasons(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        java.util.Map<String, Double> parsed = new java.util.LinkedHashMap<>();
+        for (String part : text.split(",")) {
+            String trimmed = part.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            String[] kv = trimmed.split(":");
+            if (kv.length != 2) {
+                throw new IllegalArgumentException(
+                        "bad season '" + trimmed + "', expected name:scale");
+            }
+            parsed.put(kv[0].trim(), Double.parseDouble(kv[1].trim()));
         }
         return parsed;
     }

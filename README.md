@@ -140,6 +140,16 @@ that already carry limits).
 Handles lines, two- and three-winding transformers and boundary (dangling)
 lines; sides with no usable flow (disconnected / near-zero current) are skipped.
 
+Beyond current, the tool can size **apparent-power** (`sqrt(P² + Q²)`, MVA) and
+**active-power** (`|P|`, MW) limits into the same group — pass `--limit-types
+CURRENT,APPARENT_POWER,ACTIVE_POWER` (any subset). All types share the permanent
+margin and temporary tiers, so the base case sits at the same 80 % on each.
+
+Ratings are often **seasonal** in reality. Pass `--seasons WINTER:1.1,SUMMER:0.9`
+to create one operational-limit group per season, each with its limits scaled by
+the season factor; `--selected-season` picks which one is made active (default:
+the first). Without `--seasons` a single group is created.
+
 ```
 cd python
 pip install -r requirements.txt
@@ -147,6 +157,9 @@ python3 add_current_limits.py --builtin ieee300 --validate
 python3 add_current_limits.py -i case1354pegase.mat -o out.xiidm --validate
 python3 add_current_limits.py -i case.xiidm --permanent-margin 1.3 \
         --tiers 1200:1.10,600:1.20,60:1.40 --group-name LOADFLOW_BASED -o out.xiidm
+python3 add_current_limits.py -i case.xiidm --limit-types CURRENT,APPARENT_POWER -o out.xiidm
+python3 add_current_limits.py -i case.xiidm --seasons WINTER:1.1,SUMMER:0.9 \
+        --selected-season SUMMER -o out.xiidm
 ```
 
 There are **two implementations** of this feature: the Python module above and a
@@ -185,21 +198,41 @@ no completion flag on the CLI, all of them run:
   case is unchanged (max ΔV ≈ 0); the regulator only acts once tap control is
   switched on, and its setpoint already equals the current voltage.
 
-- **Generator energy source** — `set_generator_energy_source` assigns an energy
-  source (default `THERMAL`) to generators whose source is `OTHER` (the IIDM
-  "unset" value). A load flow can't infer fuel type, so this is a documented
-  blanket default, not inference.
+- **Generation mix** — `set_generation_mix` lays down a realistic energy-source
+  distribution instead of a single default. Fuel type can't be inferred from a
+  load flow, so generators are ranked by active-power capability and the largest
+  units get the base-load sources (nuclear, thermal), the smallest the
+  intermittent ones (wind, solar), so the shares of a representative European mix
+  (`{NUCLEAR: 0.15, THERMAL: 0.35, HYDRO: 0.20, WIND: 0.20, SOLAR: 0.10}` by
+  default) are met **by capacity**. Deterministic; only generators whose source
+  is `OTHER` are touched.
+- **Apparent-power ratings (`rated_s`)** — `add_rated_s` fills the nameplate MVA
+  many cases omit: generators get `rated_s = |P| / power_factor` (0.85 default),
+  two-winding transformers `rated_s = base-case apparent flow / loading` (0.6
+  default, i.e. loaded to 60 % of nameplate in the base case). Existing ratings
+  are left untouched.
 - **Active power control** — `add_active_power_control` sets the
   `activePowerControl` extension (participate = true, participation factor
   proportional to `maxP`, configurable droop) so distributed slack / redispatch
   has something to act on.
+- **Synthetic measurements** (opt-in, `--measurements`) — `add_measurements`
+  attaches `measurements` extensions valued from the load flow: active/reactive
+  power on every generator and load, and active/reactive power and current on
+  every line and transformer side, each with a standard deviation of
+  `max(|value| * rel, floor)`. Useful as state-estimation input.
+- **Observability** (opt-in, `--observability`) — `add_observability` marks every
+  injection and branch observable via the `injectionObservability` /
+  `branchObservability` extensions, with a per-quantity standard deviation.
 
 Phase tap changers are deliberately **not** synthesized — a phase shifter is a
 specific physical device, and cases that use them already carry them (PEGASE 13k
-has 74). On `case13659pegase` this fills the 7 placeholder-infinite reactive
-bands, adds a ratio tap changer to the 5 655 transformers that lack one (leaving
-the 74 phase-shifters alone), sets 4 092 energy sources and 4 092 participation
-factors. Python and Java produce identical counts.
+has 74). On `case13659pegase` the run-all default fills the 7 placeholder-infinite
+reactive bands, adds a ratio tap changer to the 5 655 transformers that lack one
+(leaving the 74 phase-shifters alone), assigns the mix across all 4 092
+generators (95 nuclear … 1 596 wind by count, base-load first), rates 5 727
+transformers, and adds 4 092 participation factors. Measurements and observability
+are opt-in (142 074 measurements on 30 103 elements when enabled). Python and Java
+produce identical counts.
 
 ```
 cd python
@@ -207,7 +240,8 @@ python3 complete_network.py --builtin ieee14                   # all completions
 python3 complete_network.py -i case13659pegase.mat -o out.xiidm
 python3 complete_network.py -i case.xiidm --reactive-limits    # only one completion
 python3 complete_network.py -i case.xiidm --ratio-tap-changers --rtc-steps 8 --rtc-step 0.0125
-python3 complete_network.py -i case.xiidm --energy-source --active-power-control
+python3 complete_network.py -i case.xiidm --generation-mix --rated-s --active-power-control
+python3 complete_network.py -i case.xiidm --measurements --observability -o out.xiidm
 ```
 
 ## Method (per-unit, on HV side)

@@ -181,22 +181,145 @@ class NetworkCompleterTest {
     }
 
     @Test
-    void energySourceSetOnUndefinedOnly() {
+    void generationMixAssignsBySize() {
         Network net = IeeeCdfNetworkFactory.create14();  // all generators OTHER
-        NetworkCompleter.EnergySourceStats stats = NetworkCompleter.setGeneratorEnergySource(
-                net, EnergySource.THERMAL, true);
-        assertEquals(5, stats.set());
-        for (Generator g : net.getGenerators()) {
-            assertEquals(EnergySource.THERMAL, g.getEnergySource());
+        // Distinct capabilities so the size ranking is unambiguous.
+        double[] caps = {500.0, 400.0, 300.0, 200.0, 100.0};
+        String[] ids = {"B1-G", "B2-G", "B3-G", "B6-G", "B8-G"};
+        for (int i = 0; i < ids.length; i++) {
+            net.getGenerator(ids[i]).setMaxP(caps[i]);
         }
+        Map<EnergySource, Double> mix = new java.util.LinkedHashMap<>();
+        mix.put(EnergySource.NUCLEAR, 0.4);
+        mix.put(EnergySource.HYDRO, 0.3);
+        mix.put(EnergySource.SOLAR, 0.3);
+        NetworkCompleter.GenerationMixStats stats = NetworkCompleter.setGenerationMix(net, mix, true);
+        assertEquals(5, stats.assigned());
+        // Largest unit is base-load (nuclear), smallest is intermittent (solar).
+        assertEquals(EnergySource.NUCLEAR, net.getGenerator("B1-G").getEnergySource());
+        assertEquals(EnergySource.SOLAR, net.getGenerator("B8-G").getEnergySource());
+        for (Generator g : net.getGenerators()) {
+            assertTrue(mix.containsKey(g.getEnergySource()));
+        }
+    }
 
-        // A generator with a real source is left alone.
-        net.getGenerator("B2-G").setEnergySource(EnergySource.HYDRO);
-        NetworkCompleter.EnergySourceStats again = NetworkCompleter.setGeneratorEnergySource(
-                net, EnergySource.THERMAL, true);
-        assertEquals(0, again.set());
-        assertEquals(5, again.skippedDefined());
-        assertEquals(EnergySource.HYDRO, net.getGenerator("B2-G").getEnergySource());
+    @Test
+    void generationMixOnlyUndefinedAndRejectBad() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        net.getGenerator("B1-G").setEnergySource(EnergySource.WIND);
+        NetworkCompleter.GenerationMixStats stats = NetworkCompleter.setGenerationMix(
+                net, NetworkCompleter.DEFAULT_GENERATION_MIX, true);
+        assertEquals(1, stats.skippedDefined());
+        assertEquals(EnergySource.WIND, net.getGenerator("B1-G").getEnergySource());
+        assertThrows(IllegalArgumentException.class,
+                () -> NetworkCompleter.setGenerationMix(net, Map.of(), true));
+        assertThrows(IllegalArgumentException.class, () -> NetworkCompleter.setGenerationMix(
+                net, Map.of(EnergySource.NUCLEAR, -1.0), true));
+    }
+
+    @Test
+    void ratedSGeneratorFromPowerFactor() {
+        Network net = Network.create("s", "test");
+        var s = net.newSubstation().setId("S").add();
+        var vl = s.newVoltageLevel().setId("VL").setNominalV(100.0)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl.getBusBreakerView().newBus().setId("B").add();
+        vl.newGenerator().setId("G").setBus("B").setConnectableBus("B")
+                .setMinP(0.0).setMaxP(80.0).setTargetP(60.0).setTargetV(100.0)
+                .setVoltageRegulatorOn(true).add();
+        vl.newLoad().setId("L").setBus("B").setConnectableBus("B").setP0(60.0).setQ0(0.0).add();
+
+        NetworkCompleter.addRatedS(net, 0.8, NetworkCompleter.DEFAULT_TRANSFORMER_LOADING,
+                false, false);
+        // rated_s = maxP / power_factor = 80 / 0.8 = 100.
+        assertEquals(100.0, net.getGenerator("G").getRatedS(), 1e-6);
+    }
+
+    @Test
+    void ratedSTransformerFromFlow() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        NetworkCompleter.addRatedS(net, NetworkCompleter.DEFAULT_GENERATOR_POWER_FACTOR,
+                0.6, true, true);
+        for (TwoWindingsTransformer tx : net.getTwoWindingsTransformers()) {
+            double sBase = Math.max(
+                    Math.hypot(tx.getTerminal1().getP(), tx.getTerminal1().getQ()),
+                    Math.hypot(tx.getTerminal2().getP(), tx.getTerminal2().getQ()));
+            assertEquals(sBase / 0.6, tx.getRatedS(), 1e-6);
+        }
+    }
+
+    @Test
+    void ratedSOnlyMissing() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        net.getGenerator("B1-G").setRatedS(500.0);
+        NetworkCompleter.RatedSStats stats = NetworkCompleter.addRatedS(net,
+                NetworkCompleter.DEFAULT_GENERATOR_POWER_FACTOR,
+                NetworkCompleter.DEFAULT_TRANSFORMER_LOADING, true, true);
+        assertEquals(1, stats.generatorsSkippedExisting());
+        assertEquals(500.0, net.getGenerator("B1-G").getRatedS(), 0.0);
+    }
+
+    @Test
+    void ratedSRejectsBadConfig() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        assertThrows(IllegalArgumentException.class,
+                () -> NetworkCompleter.addRatedS(net, 0.0, 0.6, true, false));
+        assertThrows(IllegalArgumentException.class,
+                () -> NetworkCompleter.addRatedS(net, 0.85, 0.0, true, false));
+        assertThrows(IllegalArgumentException.class,
+                () -> NetworkCompleter.addRatedS(net, 0.85, 1.5, true, false));
+    }
+
+    @Test
+    void measurementsFromLoadFlow() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        NetworkCompleter.MeasurementsStats stats = NetworkCompleter.addMeasurements(
+                net, 0.02, 0.5, true, true);
+        // 16 injections x 2 + 20 branches x 6 = 152 measurements.
+        assertEquals(152, stats.measurements());
+
+        @SuppressWarnings("unchecked")
+        com.powsybl.iidm.network.extensions.Measurements<com.powsybl.iidm.network.Line> meas =
+                net.getLine("L1-2-1").getExtension(
+                        com.powsybl.iidm.network.extensions.Measurements.class);
+        assertNotNull(meas);
+        double p1 = net.getLine("L1-2-1").getTerminal1().getP();
+        com.powsybl.iidm.network.extensions.Measurement m = meas.getMeasurements(
+                com.powsybl.iidm.network.extensions.Measurement.Type.ACTIVE_POWER).stream()
+                .filter(x -> x.getSide() == ThreeSidesOne())
+                .findFirst().orElseThrow();
+        assertEquals(p1, m.getValue(), 1e-6);
+        assertEquals(Math.max(Math.abs(p1) * 0.02, 0.5), m.getStandardDeviation(), 1e-6);
+        // Idempotent under only_missing.
+        assertEquals(0, NetworkCompleter.addMeasurements(net, 0.01, 0.1, true, false).measurements());
+    }
+
+    private static com.powsybl.iidm.network.ThreeSides ThreeSidesOne() {
+        return com.powsybl.iidm.network.ThreeSides.ONE;
+    }
+
+    @Test
+    void observabilityFlags() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        NetworkCompleter.ObservabilityStats stats = NetworkCompleter.addObservability(net, 2.0, true);
+        assertEquals(16, stats.injections());   // 5 generators + 11 loads
+        assertEquals(20, stats.branches());     // 17 lines + 3 transformers
+        var inj = net.getGenerator("B1-G").getExtension(
+                com.powsybl.iidm.network.extensions.InjectionObservability.class);
+        assertNotNull(inj);
+        assertTrue(inj.isObservable());
+        assertEquals(2.0, inj.getQualityP().getStandardDeviation(), 1e-9);
+        // Idempotent under only_missing.
+        NetworkCompleter.ObservabilityStats again = NetworkCompleter.addObservability(net, 1.0, true);
+        assertEquals(0, again.injections());
+        assertEquals(0, again.branches());
+    }
+
+    @Test
+    void measurementsRejectBadStd() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        assertThrows(IllegalArgumentException.class,
+                () -> NetworkCompleter.addMeasurements(net, -0.1, 0.1, true, true));
     }
 
     @Test
@@ -235,17 +358,18 @@ class NetworkCompleterTest {
         Network net = ExtendedIeee14Factory.create();
         NetworkCompleter.addReactiveLimits(net, NetworkCompleter.ReactiveConfig.defaults());
         NetworkCompleter.addRatioTapChangers(net, NetworkCompleter.RatioTapConfig.defaults());
-        NetworkCompleter.setGeneratorEnergySource(net, EnergySource.THERMAL, true);
+        NetworkCompleter.setGenerationMix(net, NetworkCompleter.DEFAULT_GENERATION_MIX, true);
         NetworkCompleter.addActivePowerControl(net, 4.0, true);
         long rtcCount = countRatioTapChangers(net);
         assertTrue(rtcCount > 0);
+        EnergySource firstSource = net.getGenerators().iterator().next().getEnergySource();
 
         java.nio.file.Path out = dir.resolve("completed.xiidm");
         NetworkSerDeWrite(net, out);
         Network reloaded = Network.read(out);
         assertEquals(rtcCount, countRatioTapChangers(reloaded));
         // Energy source and active power control survive the round trip.
-        assertEquals(EnergySource.THERMAL, reloaded.getGenerators().iterator().next().getEnergySource());
+        assertEquals(firstSource, reloaded.getGenerators().iterator().next().getEnergySource());
         assertNotNull(reloaded.getGenerators().iterator().next()
                 .getExtension(ActivePowerControl.class));
         assertTrue(LoadFlow.run(reloaded).isFullyConverged());

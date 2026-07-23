@@ -101,7 +101,7 @@ curve-transporter/
     ├── ConvertToNodeBreaker.java       picocli CLI for the converter
     ├── CurrentLimitsGenerator.java     load-flow-based current limit sets
     ├── AddCurrentLimits.java           picocli CLI for the limit generator
-    ├── NetworkCompleter.java           fill missing reactive limits + ratio taps
+    ├── NetworkCompleter.java           fill reactive limits, taps, mix, rated_s, measurements
     └── CompleteNetwork.java            picocli CLI for the completer
 ```
 
@@ -257,12 +257,21 @@ lines are handled; sides with no usable flow (disconnected / near-zero current)
 are skipped. This mirrors the Python `add_current_limits.py` module bit for bit
 — the two produce identical side counts on every case below.
 
+Beyond current, apparent-power (`sqrt(P² + Q²)`, MVA) and active-power (`|P|`, MW)
+limits can be sized into the same group via `--limit-types
+CURRENT,APPARENT_POWER,ACTIVE_POWER` (any subset), all sharing the permanent
+margin and tiers. Ratings can be **seasonal**: `--seasons WINTER:1.1,SUMMER:0.9`
+creates one group per season with limits scaled by the factor, and
+`--selected-season` picks the active one (default: first).
+
 ```bash
 java -cp target/curve-transporter-1.0.0-shaded.jar \
      com.example.transporter.AddCurrentLimits --ieee14 --validate
 # --ieee14-extended : IEEE-14 + 3-winding transformer, boundary lines, …
 # -i case13659pegase.xiidm -o out.xiidm --validate
 # --permanent-margin 1.3 --tiers 1200:1.10,600:1.20,60:1.40 --group-name LOADFLOW_BASED
+# --limit-types CURRENT,APPARENT_POWER
+# --seasons WINTER:1.1,SUMMER:0.9 --selected-season SUMMER
 ```
 
 `--validate` runs the load flow and reports each side's base-case loading
@@ -298,12 +307,25 @@ missing, sized from a load flow — the Java port of Python's
   only acts once tap control is on, with its setpoint already at the current
   voltage.
 
-- **`setGeneratorEnergySource`** assigns an energy source (default `THERMAL`) to
-  generators whose source is `OTHER`. A load flow can't infer fuel type, so this
-  is a documented blanket default, not inference.
+- **`setGenerationMix`** lays down a realistic energy-source distribution: fuel
+  type can't be inferred from a load flow, so generators are ranked by
+  active-power capability and the largest units get the base-load sources
+  (nuclear, thermal), the smallest the intermittent ones (wind, solar), so a
+  representative European mix (`NUCLEAR 0.15, THERMAL 0.35, HYDRO 0.20, WIND 0.20,
+  SOLAR 0.10` by default) is met **by capacity**. Only `OTHER` generators change.
+- **`addRatedS`** fills the nameplate MVA (`rated_s`) many cases omit: generators
+  get `|P| / powerFactor` (0.85 default), two-winding transformers `base-case
+  apparent flow / loading` (0.6 default). Existing ratings are left untouched.
 - **`addActivePowerControl`** sets the `ActivePowerControl` extension (participate,
   participation factor proportional to `maxP`, configurable droop) so distributed
   slack / redispatch has something to act on.
+- **`addMeasurements`** (opt-in, `--measurements`) attaches `Measurements`
+  extensions valued from the load flow — active/reactive power on injections,
+  active/reactive power and current on branch sides — each with standard deviation
+  `max(|value| * rel, floor)`. State-estimation input.
+- **`addObservability`** (opt-in, `--observability`) marks every injection and
+  branch observable (`InjectionObservability` / `BranchObservability`), with a
+  per-quantity standard deviation.
 
 Phase tap changers are deliberately not synthesized (a phase shifter is a
 physical device; cases that use them already carry them).
@@ -314,13 +336,16 @@ java -cp target/curve-transporter-1.0.0-shaded.jar \
 # -i case13659pegase.xiidm -o out.xiidm
 # --reactive-limits                                (only reactive limits)
 # --ratio-tap-changers --rtc-steps 8 --rtc-step 0.0125
-# --energy-source --active-power-control
+# --generation-mix --rated-s --active-power-control
+# --measurements --observability                   (opt-in, not in run-all)
 ```
 
-On `case13659pegase` this fills the 7 placeholder reactive bands, adds a ratio
-tap changer to the 5 655 transformers lacking one (the 74 phase-shifters are
-left alone), sets 4 092 energy sources and 4 092 participation factors —
-matching the Python module's counts.
+On `case13659pegase` the run-all default fills the 7 placeholder reactive bands,
+adds a ratio tap changer to the 5 655 transformers lacking one (the 74
+phase-shifters are left alone), assigns the mix across all 4 092 generators (95
+nuclear … 1 596 wind by count), rates 5 727 transformers, and adds 4 092
+participation factors. Measurements / observability are opt-in (142 074
+measurements on 30 103 elements) — matching the Python module's counts.
 
 ## Dependencies
 
