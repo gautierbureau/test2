@@ -168,10 +168,37 @@ def test_partial_flow_branch_selects_only_live_sides():
     assert loading_report(net, run_loadflow=False)["overloaded"] == 0
 
 
+def test_apparent_power_limits_alongside_current():
+    net = pn.create_ieee14()
+    stats = add_current_limits(net, limit_types=("CURRENT", "APPARENT_POWER"))
+    ol = net.get_operational_limits(show_inactive_sets=True)
+    assert set(ol.index.get_level_values("type")) == {"CURRENT", "APPARENT_POWER"}
+    # Both types share the one group.
+    assert set(ol.index.get_level_values("group_name")) == {"LOADFLOW_BASED"}
+    # Twice as many limit rows as a single-type run (both permanents counted).
+    assert stats["permanent_limits"] == 2 * stats["sides"]
+
+    for lt in ("CURRENT", "APPARENT_POWER"):
+        report = loading_report(net, run_loadflow=False, limit_type=lt)
+        assert report["overloaded"] == 0
+        assert report["max_loading"] == pytest.approx(1 / DEFAULT_PERMANENT_MARGIN, abs=1e-6)
+
+
+def test_active_power_limit_type():
+    net = pn.create_ieee14()
+    add_current_limits(net, limit_types=("ACTIVE_POWER",))
+    ol = net.get_operational_limits(show_inactive_sets=True)
+    assert set(ol.index.get_level_values("type")) == {"ACTIVE_POWER"}
+
+
 def test_rejects_bad_config():
     net = pn.create_ieee14()
     with pytest.raises(ValueError):
         add_current_limits(net, permanent_margin=0.0)
+    with pytest.raises(ValueError):
+        add_current_limits(net, limit_types=("REACTIVE_POWER",))  # unknown type
+    with pytest.raises(ValueError):
+        add_current_limits(net, limit_types=())  # empty
     with pytest.raises(ValueError):
         add_current_limits(net, permanent_margin=0.9)  # <= 1: limit below flow
     with pytest.raises(ValueError):
