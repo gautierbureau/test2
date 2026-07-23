@@ -40,7 +40,6 @@ DEFAULT_POWER_FACTOR = 0.95
 DEFAULT_PLACEHOLDER_THRESHOLD = 1e4  # |Q| at/above this (MVar) is a placeholder
 DEFAULT_RTC_STEPS_PER_SIDE = 8
 DEFAULT_RTC_STEP_INCREMENT = 0.0125  # 1.25 % per step -> +/-10 % over 8 steps
-DEFAULT_ENERGY_SOURCE = "THERMAL"
 DEFAULT_DROOP = 4.0  # percent
 DEFAULT_GENERATOR_POWER_FACTOR = 0.85  # rated_s = maxP / power factor
 DEFAULT_TRANSFORMER_LOADING = 0.6  # base-case apparent flow as a share of rated_s
@@ -228,38 +227,8 @@ def _side2_voltage(tx, buses) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# Generator energy source
+# Generation mix (energy sources)
 # ---------------------------------------------------------------------------
-
-def set_generator_energy_source(
-    network: pn.Network,
-    energy_source: str = DEFAULT_ENERGY_SOURCE,
-    only_undefined: bool = True,
-) -> dict:
-    """Assign an energy source to generators that carry none.
-
-    A load flow cannot infer fuel type, so this is a blanket default: generators
-    whose energy source is ``OTHER`` (the IIDM "unset" value) are set to
-    ``energy_source``. With ``only_undefined=False`` every generator is set.
-    """
-    if energy_source not in _VALID_ENERGY_SOURCES:
-        raise ValueError(f"energy_source must be one of {sorted(_VALID_ENERGY_SOURCES)}")
-
-    gens = network.get_generators(all_attributes=True)
-    stats = {"generators": len(gens), "set": 0, "skipped_defined": 0}
-    if gens.empty:
-        return stats
-    if only_undefined:
-        target = gens.index[gens["energy_source"] == "OTHER"]
-        stats["skipped_defined"] = len(gens) - len(target)
-    else:
-        target = gens.index
-    if len(target):
-        network.update_generators(id=list(target),
-                                  energy_source=[energy_source] * len(target))
-        stats["set"] = len(target)
-    return stats
-
 
 def set_generation_mix(
     network: pn.Network,
@@ -513,7 +482,7 @@ _BUILTINS = {
 def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Fill in missing network data (reactive limits, ratio tap "
-                    "changers, generator energy source, active power control, "
+                    "changers, generation mix, active power control, "
                     "apparent-power ratings), sized from an AC load flow. With no "
                     "completion flag, all run.")
     src = parser.add_mutually_exclusive_group(required=True)
@@ -527,8 +496,6 @@ def _main(argv=None) -> int:
                         help="add regulating ratio tap changers where missing")
     parser.add_argument("--generation-mix", action="store_true",
                         help="assign a realistic energy-source mix (default when no flag)")
-    parser.add_argument("--energy-source", action="store_true",
-                        help="set a single uniform energy source on generators that have none")
     parser.add_argument("--active-power-control", action="store_true",
                         help="add participation factors for distributed slack")
     parser.add_argument("--rated-s", action="store_true",
@@ -542,8 +509,6 @@ def _main(argv=None) -> int:
     parser.add_argument("--rtc-step", type=float, default=DEFAULT_RTC_STEP_INCREMENT,
                         help="ratio tap changer step increment "
                              f"(default: {DEFAULT_RTC_STEP_INCREMENT})")
-    parser.add_argument("--energy-source-value", default=DEFAULT_ENERGY_SOURCE,
-                        help=f"energy source to assign (default: {DEFAULT_ENERGY_SOURCE})")
     parser.add_argument("--droop", type=float, default=DEFAULT_DROOP,
                         help=f"active power control droop percent (default: {DEFAULT_DROOP})")
     parser.add_argument("--generator-power-factor", type=float,
@@ -559,12 +524,10 @@ def _main(argv=None) -> int:
     # With no explicit selection, run every completion (using the realistic
     # generation mix rather than the uniform energy source).
     selected = (args.reactive_limits or args.ratio_tap_changers
-                or args.energy_source or args.generation_mix
-                or args.active_power_control or args.rated_s)
+                or args.generation_mix or args.active_power_control or args.rated_s)
     do_reactive = args.reactive_limits or not selected
     do_taps = args.ratio_tap_changers or not selected
     do_mix = args.generation_mix or not selected
-    do_energy = args.energy_source  # uniform: only when explicitly requested
     do_apc = args.active_power_control or not selected
     do_rated_s = args.rated_s or not selected
 
@@ -588,10 +551,6 @@ def _main(argv=None) -> int:
         m = set_generation_mix(network)
         print(f"Generation mix: assigned {m['assigned']} of {m['generators']} generator(s) "
               f"({m['skipped_defined']} already defined) -> {m['by_source']}.")
-    if do_energy:
-        e = set_generator_energy_source(network, energy_source=args.energy_source_value)
-        print(f"Energy source: set {e['set']} of {e['generators']} generator(s) to "
-              f"{args.energy_source_value} ({e['skipped_defined']} already defined).")
     if do_apc:
         a = add_active_power_control(network, droop=args.droop)
         print(f"Active power control: added {a['added']} of {a['generators']} "

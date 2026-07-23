@@ -18,7 +18,6 @@ from complete_network import (
     add_ratio_tap_changers,
     add_reactive_limits,
     set_generation_mix,
-    set_generator_energy_source,
 )
 from tests.test_bus_to_node_breaker import _extended_ieee14
 
@@ -157,26 +156,6 @@ def test_ratio_tap_changers_reject_bad_config():
 # ---------------------------------------------------------------------------
 # Energy source + active power control
 # ---------------------------------------------------------------------------
-
-def test_energy_source_set_on_undefined_only():
-    net = pn.create_ieee14()  # all generators start as OTHER
-    stats = set_generator_energy_source(net, energy_source="THERMAL")
-    assert stats["set"] == 5
-    assert set(net.get_generators(all_attributes=True)["energy_source"]) == {"THERMAL"}
-
-    # A generator with a real source is left alone.
-    net.update_generators(id=["B2-G"], energy_source=["HYDRO"])
-    again = set_generator_energy_source(net, energy_source="THERMAL")
-    assert again["set"] == 0
-    assert again["skipped_defined"] == 5
-    assert net.get_generators(all_attributes=True).loc["B2-G", "energy_source"] == "HYDRO"
-
-
-def test_energy_source_rejects_bad_value():
-    net = pn.create_ieee14()
-    with pytest.raises(ValueError):
-        set_generator_energy_source(net, energy_source="COAL")
-
 
 def test_generation_mix_assigns_by_size():
     net = pn.create_ieee14()
