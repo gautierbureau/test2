@@ -14,6 +14,8 @@ import pytest
 
 from complete_network import (
     add_active_power_control,
+    add_measurements,
+    add_observability,
     add_rated_s,
     add_ratio_tap_changers,
     add_reactive_limits,
@@ -260,6 +262,50 @@ def test_rated_s_rejects_bad_config():
         add_rated_s(net, transformer_loading=0.0)
     with pytest.raises(ValueError):
         add_rated_s(net, transformer_loading=1.5)
+
+
+# ---------------------------------------------------------------------------
+# Synthetic measurements and observability
+# ---------------------------------------------------------------------------
+
+def test_measurements_from_load_flow():
+    net = pn.create_ieee14()
+    stats = add_measurements(net, relative_std_dev=0.02, std_dev_floor=0.5)
+    # 16 injections x 2 + 20 branches x 6 = 152 measurements.
+    assert stats["measurements"] == 152
+    ext = net.get_extensions("measurements")
+    assert set(ext["type"]) == {"ACTIVE_POWER", "REACTIVE_POWER", "CURRENT"}
+    assert set(ext["side"]) == {"", "ONE", "TWO"}
+    # Value equals the load-flow flow (add_measurements already solved the
+    # network); std dev honours the relative/floor rule.
+    p1 = net.get_lines(attributes=["p1"]).loc["L1-2-1", "p1"]
+    row = ext.loc["L1-2-1"]
+    meas = row[(row["type"] == "ACTIVE_POWER") & (row["side"] == "ONE")].iloc[0]
+    assert meas["value"] == pytest.approx(p1)
+    assert meas["standard_deviation"] == pytest.approx(max(abs(p1) * 0.02, 0.5))
+    # Idempotent under only_missing.
+    assert add_measurements(net, run_loadflow=False)["measurements"] == 0
+
+
+def test_observability_flags():
+    net = pn.create_ieee14()
+    stats = add_observability(net, std_dev=2.0)
+    assert stats["injections"] == 16   # 5 generators + 11 loads
+    assert stats["branches"] == 20     # 17 lines + 3 transformers
+    inj = net.get_extensions("injectionObservability")
+    assert bool(inj["observable"].all())
+    assert (inj["p_standard_deviation"] == 2.0).all()
+    brc = net.get_extensions("branchObservability")
+    assert bool(brc["observable"].all())
+    # Idempotent under only_missing.
+    again = add_observability(net)
+    assert again["injections"] == 0 and again["branches"] == 0
+
+
+def test_measurements_reject_bad_std():
+    net = pn.create_ieee14()
+    with pytest.raises(ValueError):
+        add_measurements(net, relative_std_dev=-0.1)
 
 
 # ---------------------------------------------------------------------------

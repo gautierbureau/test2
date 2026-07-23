@@ -52,6 +52,10 @@ DEFAULT_GENERATION_MIX = {
 _MIX_ORDER = ["NUCLEAR", "THERMAL", "HYDRO", "WIND", "SOLAR", "OTHER"]
 _VALID_ENERGY_SOURCES = {"HYDRO", "NUCLEAR", "WIND", "THERMAL", "SOLAR", "OTHER"}
 
+DEFAULT_MEASUREMENT_STD_DEV = 0.01  # standard deviation as a fraction of |value|
+DEFAULT_STD_DEV_FLOOR = 0.1         # absolute floor on the standard deviation
+DEFAULT_OBSERVABILITY_STD_DEV = 1.0
+
 
 # ---------------------------------------------------------------------------
 # Reactive limits
@@ -310,6 +314,157 @@ def _gen_capacity(g) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Synthetic measurements and observability (state-estimation input)
+# ---------------------------------------------------------------------------
+
+# Injection measurement types: (measurement_type, value_column).
+_INJECTION_MEASUREMENTS = [("ACTIVE_POWER", "p"), ("REACTIVE_POWER", "q")]
+# Branch per-side measurement types: side -> [(measurement_type, value_column)].
+_BRANCH_MEASUREMENTS = {
+    "ONE": [("ACTIVE_POWER", "p1"), ("REACTIVE_POWER", "q1"), ("CURRENT", "i1")],
+    "TWO": [("ACTIVE_POWER", "p2"), ("REACTIVE_POWER", "q2"), ("CURRENT", "i2")],
+}
+
+
+def add_measurements(
+    network: pn.Network,
+    relative_std_dev: float = DEFAULT_MEASUREMENT_STD_DEV,
+    std_dev_floor: float = DEFAULT_STD_DEV_FLOOR,
+    include_injections: bool = True,
+    include_branches: bool = True,
+    only_missing: bool = True,
+    run_loadflow: bool = True,
+    lf_parameters: Optional[lf.Parameters] = None,
+) -> dict:
+    """Attach synthetic analog measurements taken from a load flow.
+
+    Turns the case into a state-estimation test bed: every generator and load
+    gets active/reactive-power measurements, every line and transformer side
+    active/reactive-power and current measurements, all valued from the base-case
+    load flow with a standard deviation of ``max(|value| * relative_std_dev,
+    std_dev_floor)``. Measured values are the exact load-flow results (no random
+    perturbation, so the result is reproducible); the standard deviation carries
+    the intended noise level.
+    """
+    if not relative_std_dev >= 0:
+        raise ValueError("relative_std_dev must be >= 0")
+    if run_loadflow:
+        _run_ac_or_raise(network, lf_parameters)
+
+    existing = set()
+    if only_missing:
+        try:
+            existing = set(network.get_extensions("measurements")
+                           .index.get_level_values("element_id"))
+        except Exception:  # noqa: BLE001 - extension table may be absent
+            existing = set()
+
+    # Injection measurements carry no side, branch measurements do; IIDM rejects
+    # an empty side, so the two go in separate create calls with distinct columns.
+    injection_rows, branch_rows = [], []
+    stats = {"measurements": 0, "elements": 0, "skipped_existing": 0}
+
+    def make(element_id, mtype, value, side=None):
+        if not math.isfinite(value):
+            return None
+        std = max(abs(value) * relative_std_dev, std_dev_floor)
+        suffix = f"{mtype}_{side}" if side else mtype
+        # pypowsybl (>=1.5, seen through 1.15) transposes the measurements
+        # extension's ``value`` and ``standard_deviation`` on create, so pass
+        # them swapped to land correctly in IIDM. test_measurements_from_load_flow
+        # asserts the round-trip and will flag it if the library ever fixes this.
+        row = {"element_id": element_id, "id": f"{element_id}_{suffix}",
+               "type": mtype, "value": std,
+               "standard_deviation": float(value), "valid": True}
+        if side is not None:
+            row["side"] = side
+        return row
+
+    if include_injections:
+        for getter in ("get_generators", "get_loads"):
+            for eid, elem in getattr(network, getter)().iterrows():
+                if eid in existing:
+                    stats["skipped_existing"] += 1
+                    continue
+                made = [make(eid, m, elem[col]) for m, col in _INJECTION_MEASUREMENTS]
+                made = [r for r in made if r]
+                if made:
+                    injection_rows.extend(made)
+                    stats["elements"] += 1
+    if include_branches:
+        for getter in ("get_lines", "get_2_windings_transformers"):
+            for eid, elem in getattr(network, getter)().iterrows():
+                if eid in existing:
+                    stats["skipped_existing"] += 1
+                    continue
+                made = [make(eid, m, elem[col], side)
+                        for side, specs in _BRANCH_MEASUREMENTS.items()
+                        for m, col in specs]
+                made = [r for r in made if r]
+                if made:
+                    branch_rows.extend(made)
+                    stats["elements"] += 1
+
+    for rows in (injection_rows, branch_rows):
+        if rows:
+            network.create_extensions("measurements",
+                                      pd.DataFrame(rows).set_index("element_id"))
+            stats["measurements"] += len(rows)
+    return stats
+
+
+def add_observability(
+    network: pn.Network,
+    std_dev: float = DEFAULT_OBSERVABILITY_STD_DEV,
+    include_injections: bool = True,
+    include_branches: bool = True,
+    only_missing: bool = True,
+) -> dict:
+    """Mark injections and branches observable, with a per-quantity std deviation.
+
+    Sets the ``injectionObservability`` extension on generators and loads and
+    the ``branchObservability`` extension on lines and transformers, flagging
+    them observable (as they would be with the measurements above) and recording
+    a standard deviation per measured quantity.
+    """
+    stats = {"injections": 0, "branches": 0}
+
+    if include_injections:
+        skip = _elements_with_extension(network, "injectionObservability") if only_missing else set()
+        ids = [e for getter in ("get_generators", "get_loads")
+               for e in getattr(network, getter)().index if e not in skip]
+        if ids:
+            network.create_extensions(
+                "injectionObservability", id=ids, observable=[True] * len(ids),
+                p_standard_deviation=[std_dev] * len(ids), p_redundant=[False] * len(ids),
+                q_standard_deviation=[std_dev] * len(ids), q_redundant=[False] * len(ids),
+                v_standard_deviation=[std_dev] * len(ids), v_redundant=[False] * len(ids))
+            stats["injections"] = len(ids)
+
+    if include_branches:
+        skip = _elements_with_extension(network, "branchObservability") if only_missing else set()
+        ids = [e for getter in ("get_lines", "get_2_windings_transformers")
+               for e in getattr(network, getter)().index if e not in skip]
+        if ids:
+            n = len(ids)
+            network.create_extensions(
+                "branchObservability", id=ids, observable=[True] * n,
+                p1_standard_deviation=[std_dev] * n, p1_redundant=[False] * n,
+                p2_standard_deviation=[std_dev] * n, p2_redundant=[False] * n,
+                q1_standard_deviation=[std_dev] * n, q1_redundant=[False] * n,
+                q2_standard_deviation=[std_dev] * n, q2_redundant=[False] * n)
+            stats["branches"] = n
+    return stats
+
+
+def _elements_with_extension(network: pn.Network, name: str) -> set:
+    try:
+        return set(network.get_extensions(name).index)
+    except Exception:  # noqa: BLE001 - extension table may be absent
+        return set()
+
+
+# ---------------------------------------------------------------------------
 # Active power control (participation factors)
 # ---------------------------------------------------------------------------
 
@@ -484,7 +639,8 @@ def _main(argv=None) -> int:
         description="Fill in missing network data (reactive limits, ratio tap "
                     "changers, generation mix, active power control, "
                     "apparent-power ratings), sized from an AC load flow. With no "
-                    "completion flag, all run.")
+                    "completion flag, all of those run. Synthetic measurements and "
+                    "observability are opt-in (--measurements / --observability).")
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("-i", "--input", help="input network file")
     src.add_argument("--builtin", choices=sorted(_BUILTINS),
@@ -500,6 +656,11 @@ def _main(argv=None) -> int:
                         help="add participation factors for distributed slack")
     parser.add_argument("--rated-s", action="store_true",
                         help="estimate apparent-power ratings where missing")
+    parser.add_argument("--measurements", action="store_true",
+                        help="add synthetic measurements from the load flow "
+                             "(opt-in; not part of the run-all default)")
+    parser.add_argument("--observability", action="store_true",
+                        help="mark injections/branches observable (opt-in)")
     parser.add_argument("--power-factor", type=float, default=DEFAULT_POWER_FACTOR,
                         help="reactive sizing fallback power factor "
                              f"(default: {DEFAULT_POWER_FACTOR})")
@@ -521,15 +682,20 @@ def _main(argv=None) -> int:
                              f"(default: {DEFAULT_TRANSFORMER_LOADING})")
     args = parser.parse_args(argv)
 
-    # With no explicit selection, run every completion (using the realistic
-    # generation mix rather than the uniform energy source).
+    # Any explicit flag disables the run-all default. Measurements and
+    # observability are opt-in: they are never part of the run-all default (they
+    # add a lot of data for a specialized, state-estimation purpose), only run
+    # when their flag is set.
     selected = (args.reactive_limits or args.ratio_tap_changers
-                or args.generation_mix or args.active_power_control or args.rated_s)
+                or args.generation_mix or args.active_power_control or args.rated_s
+                or args.measurements or args.observability)
     do_reactive = args.reactive_limits or not selected
     do_taps = args.ratio_tap_changers or not selected
     do_mix = args.generation_mix or not selected
     do_apc = args.active_power_control or not selected
     do_rated_s = args.rated_s or not selected
+    do_measurements = args.measurements
+    do_observability = args.observability
 
     network = _BUILTINS[args.builtin]() if args.builtin else pn.load(args.input)
     # One load flow shared by all completions.
@@ -561,6 +727,14 @@ def _main(argv=None) -> int:
         print(f"Rated S: set {s['generators_set']} of {s['generators']} generator(s) and "
               f"{s['transformers_set']} of {s['transformers']} transformer(s) "
               f"({s['transformers_no_flow']} transformer(s) had no base-case flow).")
+    if do_measurements:
+        me = add_measurements(network, run_loadflow=False)
+        print(f"Measurements: added {me['measurements']} measurement(s) on "
+              f"{me['elements']} element(s).")
+    if do_observability:
+        ob = add_observability(network)
+        print(f"Observability: marked {ob['injections']} injection(s) and "
+              f"{ob['branches']} branch(es) observable.")
 
     if args.output:
         network.save(args.output, format="XIIDM")
