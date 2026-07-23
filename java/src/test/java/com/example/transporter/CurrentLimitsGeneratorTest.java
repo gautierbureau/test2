@@ -190,6 +190,91 @@ class CurrentLimitsGeneratorTest {
         assertEquals("IT90s", CurrentLimitsGenerator.tierName(90));
     }
 
+    @Test
+    void apparentPowerLimitsAlongsideCurrent() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        CurrentLimitsGenerator.Stats stats = CurrentLimitsGenerator.apply(net,
+                CurrentLimitsGenerator.Config.defaults().withLimitTypes(List.of(
+                        com.powsybl.iidm.network.LimitType.CURRENT,
+                        com.powsybl.iidm.network.LimitType.APPARENT_POWER)));
+        // Both types share the one group; twice as many permanents as a single run.
+        assertEquals(2 * stats.sides(), stats.permanentLimits());
+
+        Line line = net.getLines().iterator().next();
+        OperationalLimitsGroup g = line.getOperationalLimitsGroup1(GROUP).orElseThrow();
+        assertTrue(g.getCurrentLimits().isPresent());
+        assertTrue(g.getApparentPowerLimits().isPresent());
+
+        for (com.powsybl.iidm.network.LimitType lt : List.of(
+                com.powsybl.iidm.network.LimitType.CURRENT,
+                com.powsybl.iidm.network.LimitType.APPARENT_POWER)) {
+            CurrentLimitsGenerator.LoadingReport report =
+                    CurrentLimitsGenerator.loadingReport(net, GROUP, false, lt);
+            assertEquals(0, report.overloaded());
+            assertEquals(1.0 / CurrentLimitsGenerator.DEFAULT_PERMANENT_MARGIN,
+                    report.maxLoading(), 1e-6);
+        }
+    }
+
+    @Test
+    void activePowerLimitType() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        CurrentLimitsGenerator.apply(net, CurrentLimitsGenerator.Config.defaults()
+                .withLimitTypes(List.of(com.powsybl.iidm.network.LimitType.ACTIVE_POWER)));
+        Line line = net.getLines().iterator().next();
+        OperationalLimitsGroup g = line.getOperationalLimitsGroup1(GROUP).orElseThrow();
+        assertTrue(g.getActivePowerLimits().isPresent());
+        assertTrue(g.getCurrentLimits().isEmpty());
+    }
+
+    @Test
+    void seasonalLimitGroups() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        java.util.Map<String, Double> seasons = new java.util.LinkedHashMap<>();
+        seasons.put("WINTER", 1.1);
+        seasons.put("SUMMER", 0.9);
+        CurrentLimitsGenerator.Stats stats = CurrentLimitsGenerator.apply(net,
+                CurrentLimitsGenerator.Config.defaults()
+                        .withSeasons(seasons).withSelectedSeason("SUMMER"));
+        assertEquals(List.of("WINTER", "SUMMER"), stats.groups());
+        assertEquals("SUMMER", stats.groupName());  // active
+
+        Line line = net.getLines().iterator().next();
+        double winter = line.getOperationalLimitsGroup1("WINTER").orElseThrow()
+                .getCurrentLimits().orElseThrow().getPermanentLimit();
+        double summer = line.getOperationalLimitsGroup1("SUMMER").orElseThrow()
+                .getCurrentLimits().orElseThrow().getPermanentLimit();
+        assertEquals(1.1 / 0.9, winter / summer, 1e-6);
+        // The selected (summer) group is active on the branches.
+        assertEquals(Optional.of("SUMMER"), line.getSelectedOperationalLimitsGroupId1());
+
+        // Base case loads the summer group at (1 / margin) / 0.9.
+        CurrentLimitsGenerator.LoadingReport report =
+                CurrentLimitsGenerator.loadingReport(net, "SUMMER", false);
+        assertEquals((1.0 / CurrentLimitsGenerator.DEFAULT_PERMANENT_MARGIN) / 0.9,
+                report.maxLoading(), 1e-6);
+        assertEquals(0, report.overloaded());
+    }
+
+    @Test
+    void seasonsRejectBadSelection() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        assertThrows(IllegalArgumentException.class, () -> CurrentLimitsGenerator.apply(net,
+                CurrentLimitsGenerator.Config.defaults()
+                        .withSeasons(java.util.Map.of("WINTER", 1.1))
+                        .withSelectedSeason("SPRING")));
+        assertThrows(IllegalArgumentException.class, () -> CurrentLimitsGenerator.apply(net,
+                CurrentLimitsGenerator.Config.defaults()
+                        .withSeasons(java.util.Map.of("WINTER", -1.0))));
+    }
+
+    @Test
+    void rejectsEmptyLimitTypes() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        assertThrows(IllegalArgumentException.class, () -> CurrentLimitsGenerator.apply(net,
+                CurrentLimitsGenerator.Config.defaults().withLimitTypes(List.of())));
+    }
+
     private static double permanent(Optional<OperationalLimitsGroup> group) {
         return group.orElseThrow().getCurrentLimits().orElseThrow().getPermanentLimit();
     }

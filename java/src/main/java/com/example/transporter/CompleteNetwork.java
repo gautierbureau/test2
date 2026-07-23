@@ -1,7 +1,6 @@
 package com.example.transporter;
 
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
-import com.powsybl.iidm.network.EnergySource;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.serde.ExportOptions;
 import com.powsybl.iidm.serde.NetworkSerDe;
@@ -25,8 +24,12 @@ import java.util.concurrent.Callable;
         mixinStandardHelpOptions = true,
         version = "complete-network 1.0.0",
         description = """
-                Fill in missing generator reactive limits and/or voltage-regulating
-                ratio tap changers on a network, sized from an AC load flow.
+                Fill in network data a case is missing, sized from an AC load flow:
+                generator reactive limits, voltage-regulating ratio tap changers, a
+                realistic generation mix, apparent-power ratings and active power
+                control. With no completion flag, all of those run. Synthetic
+                measurements and observability are opt-in (--measurements /
+                --observability).
                 """
 )
 public class CompleteNetwork implements Callable<Integer> {
@@ -53,13 +56,27 @@ public class CompleteNetwork implements Callable<Integer> {
             description = "Add regulating ratio tap changers where missing.")
     private boolean ratioTapChangers;
 
-    @Option(names = {"--energy-source"},
-            description = "Set energy source on generators that have none.")
-    private boolean energySource;
+    @Option(names = {"--generation-mix"},
+            description = "Assign a realistic energy-source mix across the fleet.")
+    private boolean generationMix;
 
     @Option(names = {"--active-power-control"},
             description = "Add participation factors for distributed slack.")
     private boolean activePowerControl;
+
+    @Option(names = {"--rated-s"},
+            description = "Fill missing apparent-power ratings on generators and transformers.")
+    private boolean ratedS;
+
+    @Option(names = {"--measurements"},
+            description = "Add synthetic measurements from the load flow "
+                    + "(opt-in; not part of the run-all default).")
+    private boolean measurements;
+
+    @Option(names = {"--observability"},
+            description = "Mark injections and branches observable "
+                    + "(opt-in; not part of the run-all default).")
+    private boolean observability;
 
     @Option(names = {"--power-factor"}, paramLabel = "PF",
             defaultValue = "" + NetworkCompleter.DEFAULT_POWER_FACTOR,
@@ -76,14 +93,21 @@ public class CompleteNetwork implements Callable<Integer> {
             description = "Ratio tap changer step increment (default: ${DEFAULT-VALUE}).")
     private double rtcStep;
 
-    @Option(names = {"--energy-source-value"}, paramLabel = "SRC", defaultValue = "THERMAL",
-            description = "Energy source to assign (default: ${DEFAULT-VALUE}).")
-    private EnergySource energySourceValue;
-
     @Option(names = {"--droop"}, paramLabel = "PCT",
             defaultValue = "" + NetworkCompleter.DEFAULT_DROOP,
             description = "Active power control droop percent (default: ${DEFAULT-VALUE}).")
     private double droop;
+
+    @Option(names = {"--generator-power-factor"}, paramLabel = "PF",
+            defaultValue = "" + NetworkCompleter.DEFAULT_GENERATOR_POWER_FACTOR,
+            description = "Rated-S generator power factor (default: ${DEFAULT-VALUE}).")
+    private double generatorPowerFactor;
+
+    @Option(names = {"--transformer-loading"}, paramLabel = "FRAC",
+            defaultValue = "" + NetworkCompleter.DEFAULT_TRANSFORMER_LOADING,
+            description = "Base-case transformer loading as a share of rated_s "
+                    + "(default: ${DEFAULT-VALUE}).")
+    private double transformerLoading;
 
     @Override
     public Integer call() {
@@ -96,13 +120,18 @@ public class CompleteNetwork implements Callable<Integer> {
                     network.getId(), network.getGeneratorCount(),
                     network.getTwoWindingsTransformerCount());
 
-            // With no explicit selection, run every completion.
+            // Any explicit completion flag disables the run-all default.
+            // Measurements and observability are opt-in: never part of run-all.
             boolean selected = reactiveLimits || ratioTapChangers
-                    || energySource || activePowerControl;
+                    || generationMix || activePowerControl || ratedS
+                    || measurements || observability;
             boolean doReactive = reactiveLimits || !selected;
             boolean doTaps = ratioTapChangers || !selected;
-            boolean doEnergy = energySource || !selected;
+            boolean doMix = generationMix || !selected;
             boolean doApc = activePowerControl || !selected;
+            boolean doRatedS = ratedS || !selected;
+            boolean doMeasurements = measurements;
+            boolean doObservability = observability;
 
             // One load flow shared by all completions.
             NetworkCompleter.runAcOrThrow(network);
@@ -124,12 +153,12 @@ public class CompleteNetwork implements Callable<Integer> {
                                 + "(%d already had a tap changer, %d without a base-case voltage).%n",
                         t.added(), t.transformers(), t.skippedExisting(), t.skippedNoVoltage());
             }
-            if (doEnergy) {
-                NetworkCompleter.EnergySourceStats e = NetworkCompleter.setGeneratorEnergySource(
-                        network, energySourceValue, true);
-                System.out.printf("Energy source: set %d of %d generator(s) to %s "
-                                + "(%d already defined).%n",
-                        e.set(), e.generators(), energySourceValue, e.skippedDefined());
+            if (doMix) {
+                NetworkCompleter.GenerationMixStats m = NetworkCompleter.setGenerationMix(
+                        network, NetworkCompleter.DEFAULT_GENERATION_MIX, true);
+                System.out.printf("Generation mix: assigned %d of %d generator(s) "
+                                + "(%d already defined) -> %s.%n",
+                        m.assigned(), m.generators(), m.skippedDefined(), m.bySource());
             }
             if (doApc) {
                 NetworkCompleter.ActivePowerControlStats a =
@@ -137,6 +166,27 @@ public class CompleteNetwork implements Callable<Integer> {
                 System.out.printf("Active power control: added %d of %d generator(s) "
                                 + "(%d already had it).%n",
                         a.added(), a.generators(), a.skippedExisting());
+            }
+            if (doRatedS) {
+                NetworkCompleter.RatedSStats s = NetworkCompleter.addRatedS(network,
+                        generatorPowerFactor, transformerLoading, true, false);
+                System.out.printf("Rated S: set %d of %d generator(s) and %d of %d "
+                                + "transformer(s) (%d transformer(s) had no base-case flow).%n",
+                        s.generatorsSet(), s.generators(), s.transformersSet(),
+                        s.transformers(), s.transformersNoFlow());
+            }
+            if (doMeasurements) {
+                NetworkCompleter.MeasurementsStats me = NetworkCompleter.addMeasurements(network,
+                        NetworkCompleter.DEFAULT_MEASUREMENT_STD_DEV,
+                        NetworkCompleter.DEFAULT_STD_DEV_FLOOR, true, false);
+                System.out.printf("Measurements: added %d measurement(s) on %d element(s).%n",
+                        me.measurements(), me.elements());
+            }
+            if (doObservability) {
+                NetworkCompleter.ObservabilityStats ob = NetworkCompleter.addObservability(network,
+                        NetworkCompleter.DEFAULT_OBSERVABILITY_STD_DEV, true);
+                System.out.printf("Observability: marked %d injection(s) and %d branch(es) "
+                                + "observable.%n", ob.injections(), ob.branches());
             }
 
             if (output != null) {

@@ -1,9 +1,10 @@
 package com.example.transporter;
 
 import com.powsybl.iidm.network.Branch;
-import com.powsybl.iidm.network.CurrentLimitsAdder;
 import com.powsybl.iidm.network.BoundaryLine;
 import com.powsybl.iidm.network.Line;
+import com.powsybl.iidm.network.LimitType;
+import com.powsybl.iidm.network.LoadingLimitsAdder;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.OperationalLimitsGroup;
 import com.powsybl.iidm.network.ThreeWindingsTransformer;
@@ -14,7 +15,9 @@ import com.powsybl.loadflow.LoadFlowResult;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 import java.util.function.DoubleSupplier;
 import java.util.function.Function;
@@ -55,6 +58,7 @@ public final class CurrentLimitsGenerator {
 
     public static final double DEFAULT_PERMANENT_MARGIN = 1.25;
     public static final String DEFAULT_GROUP_NAME = "LOADFLOW_BASED";
+    public static final List<LimitType> DEFAULT_LIMIT_TYPES = List.of(LimitType.CURRENT);
 
     /** 20 min @ 110 %, 10 min @ 120 %, 1 min @ 140 % of the permanent limit. */
     public static final List<TemporaryTier> DEFAULT_TEMPORARY_TIERS = List.of(
@@ -78,61 +82,92 @@ public final class CurrentLimitsGenerator {
                          double minCurrent,
                          boolean runLoadFlow,
                          boolean onlyMissing,
-                         boolean select) {
+                         boolean select,
+                         List<LimitType> limitTypes,
+                         Map<String, Double> seasons,
+                         String selectedSeason) {
 
         public static Config defaults() {
             return new Config(DEFAULT_PERMANENT_MARGIN, DEFAULT_TEMPORARY_TIERS,
-                    DEFAULT_GROUP_NAME, true, true, 1.0, true, false, true);
+                    DEFAULT_GROUP_NAME, true, true, 1.0, true, false, true,
+                    DEFAULT_LIMIT_TYPES, null, null);
         }
 
         public Config withPermanentMargin(double m) {
             return new Config(m, temporaryTiers, groupName, includeTransformers,
-                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, select);
+                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, select,
+                    limitTypes, seasons, selectedSeason);
         }
 
         public Config withTemporaryTiers(List<TemporaryTier> t) {
             return new Config(permanentMargin, t, groupName, includeTransformers,
-                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, select);
+                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, select,
+                    limitTypes, seasons, selectedSeason);
         }
 
         public Config withGroupName(String n) {
             return new Config(permanentMargin, temporaryTiers, n, includeTransformers,
-                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, select);
+                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, select,
+                    limitTypes, seasons, selectedSeason);
         }
 
         public Config withIncludeTransformers(boolean b) {
             return new Config(permanentMargin, temporaryTiers, groupName, b,
-                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, select);
+                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, select,
+                    limitTypes, seasons, selectedSeason);
         }
 
         public Config withIncludeBoundaryLines(boolean b) {
             return new Config(permanentMargin, temporaryTiers, groupName, includeTransformers,
-                    b, minCurrent, runLoadFlow, onlyMissing, select);
+                    b, minCurrent, runLoadFlow, onlyMissing, select,
+                    limitTypes, seasons, selectedSeason);
         }
 
         public Config withMinCurrent(double c) {
             return new Config(permanentMargin, temporaryTiers, groupName, includeTransformers,
-                    includeBoundaryLines, c, runLoadFlow, onlyMissing, select);
+                    includeBoundaryLines, c, runLoadFlow, onlyMissing, select,
+                    limitTypes, seasons, selectedSeason);
         }
 
         public Config withRunLoadFlow(boolean b) {
             return new Config(permanentMargin, temporaryTiers, groupName, includeTransformers,
-                    includeBoundaryLines, minCurrent, b, onlyMissing, select);
+                    includeBoundaryLines, minCurrent, b, onlyMissing, select,
+                    limitTypes, seasons, selectedSeason);
         }
 
         public Config withOnlyMissing(boolean b) {
             return new Config(permanentMargin, temporaryTiers, groupName, includeTransformers,
-                    includeBoundaryLines, minCurrent, runLoadFlow, b, select);
+                    includeBoundaryLines, minCurrent, runLoadFlow, b, select,
+                    limitTypes, seasons, selectedSeason);
         }
 
         public Config withSelect(boolean b) {
             return new Config(permanentMargin, temporaryTiers, groupName, includeTransformers,
-                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, b);
+                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, b,
+                    limitTypes, seasons, selectedSeason);
+        }
+
+        public Config withLimitTypes(List<LimitType> t) {
+            return new Config(permanentMargin, temporaryTiers, groupName, includeTransformers,
+                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, select,
+                    t, seasons, selectedSeason);
+        }
+
+        public Config withSeasons(Map<String, Double> s) {
+            return new Config(permanentMargin, temporaryTiers, groupName, includeTransformers,
+                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, select,
+                    limitTypes, s, selectedSeason);
+        }
+
+        public Config withSelectedSeason(String s) {
+            return new Config(permanentMargin, temporaryTiers, groupName, includeTransformers,
+                    includeBoundaryLines, minCurrent, runLoadFlow, onlyMissing, select,
+                    limitTypes, seasons, s);
         }
     }
 
-    /** What the generator produced. */
-    public record Stats(String groupName, int branches, int sides,
+    /** What the generator produced. {@code groupName} is the active group. */
+    public record Stats(String groupName, List<String> groups, int branches, int sides,
                         int permanentLimits, int temporaryLimits,
                         int skippedNoFlow, int skippedExisting) {
     }
@@ -143,39 +178,74 @@ public final class CurrentLimitsGenerator {
      */
     public static Stats apply(Network network, Config cfg) {
         validateConfig(cfg);
+        ResolvedGroups groups = resolveGroups(cfg);
         if (cfg.runLoadFlow()) {
             runAcOrThrow(network, null);
         }
 
         Counters total = new Counters();
         for (Line line : network.getLines()) {
-            processElement(line.getId(), branchSides(line), cfg, total);
+            processElement(line.getId(), branchSides(line), cfg, groups, total);
         }
         if (cfg.includeTransformers()) {
             for (TwoWindingsTransformer tx : network.getTwoWindingsTransformers()) {
-                processElement(tx.getId(), branchSides(tx), cfg, total);
+                processElement(tx.getId(), branchSides(tx), cfg, groups, total);
             }
             for (ThreeWindingsTransformer t3 : network.getThreeWindingsTransformers()) {
-                processElement(t3.getId(), legSides(t3), cfg, total);
+                processElement(t3.getId(), legSides(t3), cfg, groups, total);
             }
         }
         if (cfg.includeBoundaryLines()) {
             for (BoundaryLine dl : network.getBoundaryLines()) {
-                processElement(dl.getId(), List.of(boundarySide(dl)), cfg, total);
+                processElement(dl.getId(), List.of(boundarySide(dl)), cfg, groups, total);
             }
         }
-        return new Stats(cfg.groupName(), total.branches, total.sides,
+        List<String> groupNames = new ArrayList<>();
+        for (Map.Entry<String, Double> g : groups.groups()) {
+            groupNames.add(g.getKey());
+        }
+        return new Stats(groups.active(), groupNames, total.branches, total.sides,
                 total.permanentLimits, total.temporaryLimits,
                 total.skippedNoFlow, total.skippedExisting);
+    }
+
+    /** Resolved set of named groups, each with a scale, and which one is active. */
+    private record ResolvedGroups(List<Map.Entry<String, Double>> groups, String active) {
+    }
+
+    private static ResolvedGroups resolveGroups(Config cfg) {
+        Map<String, Double> seasons = cfg.seasons();
+        if (seasons == null || seasons.isEmpty()) {
+            return new ResolvedGroups(
+                    List.of(Map.entry(cfg.groupName(), 1.0)), cfg.groupName());
+        }
+        for (Map.Entry<String, Double> e : seasons.entrySet()) {
+            if (!(e.getValue() > 0)) {
+                throw new IllegalArgumentException(
+                        "season scale for " + e.getKey() + " must be positive");
+            }
+        }
+        String active = cfg.selectedSeason() != null
+                ? cfg.selectedSeason() : seasons.keySet().iterator().next();
+        if (!seasons.containsKey(active)) {
+            throw new IllegalArgumentException(
+                    "selectedSeason '" + active + "' is not one of " + seasons.keySet());
+        }
+        List<Map.Entry<String, Double>> groups = new ArrayList<>(seasons.entrySet());
+        return new ResolvedGroups(groups, active);
     }
 
     // -----------------------------------------------------------------------
     // Per-side handling
     // -----------------------------------------------------------------------
 
-    /** A single side of a branch: its current, existing limits, and group hooks. */
+    /** A single side of a branch: its flows, existing limits, and group hooks. */
     private interface SideHandle {
         double current();
+
+        double activePower();
+
+        double reactivePower();
 
         boolean hasExistingLimits();
 
@@ -184,7 +254,8 @@ public final class CurrentLimitsGenerator {
         void select(String id);
     }
 
-    private static SideHandle side(DoubleSupplier current,
+    private static SideHandle side(DoubleSupplier current, DoubleSupplier activePower,
+                                   DoubleSupplier reactivePower,
                                    Supplier<Collection<OperationalLimitsGroup>> existing,
                                    Function<String, OperationalLimitsGroup> newGroup,
                                    Consumer<String> select) {
@@ -192,6 +263,16 @@ public final class CurrentLimitsGenerator {
             @Override
             public double current() {
                 return current.getAsDouble();
+            }
+
+            @Override
+            public double activePower() {
+                return activePower.getAsDouble();
+            }
+
+            @Override
+            public double reactivePower() {
+                return reactivePower.getAsDouble();
             }
 
             @Override
@@ -213,49 +294,66 @@ public final class CurrentLimitsGenerator {
 
     private static List<SideHandle> branchSides(Branch<?> b) {
         return List.of(
-                side(() -> b.getTerminal1().getI(), b::getOperationalLimitsGroups1,
+                side(() -> b.getTerminal1().getI(), () -> b.getTerminal1().getP(),
+                        () -> b.getTerminal1().getQ(), b::getOperationalLimitsGroups1,
                         b::newOperationalLimitsGroup1, b::setSelectedOperationalLimitsGroup1),
-                side(() -> b.getTerminal2().getI(), b::getOperationalLimitsGroups2,
+                side(() -> b.getTerminal2().getI(), () -> b.getTerminal2().getP(),
+                        () -> b.getTerminal2().getQ(), b::getOperationalLimitsGroups2,
                         b::newOperationalLimitsGroup2, b::setSelectedOperationalLimitsGroup2));
     }
 
     private static List<SideHandle> legSides(ThreeWindingsTransformer t3) {
         List<SideHandle> sides = new ArrayList<>(3);
         for (ThreeWindingsTransformer.Leg leg : t3.getLegs()) {
-            sides.add(side(() -> leg.getTerminal().getI(), leg::getOperationalLimitsGroups,
+            sides.add(side(() -> leg.getTerminal().getI(), () -> leg.getTerminal().getP(),
+                    () -> leg.getTerminal().getQ(), leg::getOperationalLimitsGroups,
                     leg::newOperationalLimitsGroup, leg::setSelectedOperationalLimitsGroup));
         }
         return sides;
     }
 
     private static SideHandle boundarySide(BoundaryLine dl) {
-        return side(() -> dl.getTerminal().getI(), dl::getOperationalLimitsGroups,
+        return side(() -> dl.getTerminal().getI(), () -> dl.getTerminal().getP(),
+                () -> dl.getTerminal().getQ(), dl::getOperationalLimitsGroups,
                 dl::newOperationalLimitsGroup, dl::setSelectedOperationalLimitsGroup);
     }
 
     private static void processElement(String id, List<SideHandle> sides, Config cfg,
-                                       Counters total) {
+                                       ResolvedGroups groups, Counters total) {
         if (cfg.onlyMissing() && sides.stream().anyMatch(SideHandle::hasExistingLimits)) {
             total.skippedExisting++;
             return;
         }
         boolean anySide = false;
         for (SideHandle side : sides) {
-            double current = side.current();
-            if (!isUsable(current, cfg.minCurrent())) {
+            // Which limit types have a usable base-case flow on this side?
+            List<LimitType> usable = new ArrayList<>();
+            for (LimitType type : cfg.limitTypes()) {
+                if (isUsable(sideValue(side, type), cfg.minCurrent())) {
+                    usable.add(type);
+                }
+            }
+            if (usable.isEmpty()) {
                 total.skippedNoFlow++;
                 continue;
             }
-            OperationalLimitsGroup group = side.newGroup(cfg.groupName());
-            buildLimits(group.newCurrentLimits(), current, cfg);
-            // Select the group only on a side that actually got a limit — pointing
-            // a side at a group with no limit there is rejected by IIDM.
+            // One group per season, each carrying every usable limit type.
+            for (Map.Entry<String, Double> g : groups.groups()) {
+                OperationalLimitsGroup group = side.newGroup(g.getKey());
+                for (LimitType type : usable) {
+                    buildLimits(newLimitAdder(group, type),
+                            sideValue(side, type) * g.getValue(), cfg);
+                }
+            }
+            // Select the active group only on a side that actually got a limit —
+            // pointing a side at a group with no limit there is rejected by IIDM.
             if (cfg.select()) {
-                side.select(cfg.groupName());
+                side.select(groups.active());
             }
             total.sides++;
-            total.permanentLimits++;
-            total.temporaryLimits += cfg.temporaryTiers().size();
+            total.permanentLimits += usable.size() * groups.groups().size();
+            total.temporaryLimits +=
+                    usable.size() * groups.groups().size() * cfg.temporaryTiers().size();
             anySide = true;
         }
         if (anySide) {
@@ -263,8 +361,31 @@ public final class CurrentLimitsGenerator {
         }
     }
 
-    private static void buildLimits(CurrentLimitsAdder adder, double current, Config cfg) {
-        double permanent = current * cfg.permanentMargin();
+    private static LoadingLimitsAdder<?, ?> newLimitAdder(OperationalLimitsGroup group,
+                                                          LimitType type) {
+        return switch (type) {
+            case CURRENT -> group.newCurrentLimits();
+            case APPARENT_POWER -> group.newApparentPowerLimits();
+            case ACTIVE_POWER -> group.newActivePowerLimits();
+            default -> throw new IllegalArgumentException("unsupported limit type " + type);
+        };
+    }
+
+    /** Observed base-case flow on a side for the given limit type (A / MVA / MW). */
+    private static double sideValue(SideHandle side, LimitType type) {
+        if (type == LimitType.CURRENT) {
+            return side.current();
+        }
+        double p = side.activePower();
+        double q = side.reactivePower();
+        if (!(Double.isFinite(p) && Double.isFinite(q))) {
+            return Double.NaN;
+        }
+        return type == LimitType.APPARENT_POWER ? Math.hypot(p, q) : Math.abs(p);
+    }
+
+    private static void buildLimits(LoadingLimitsAdder<?, ?> adder, double baseValue, Config cfg) {
+        double permanent = baseValue * cfg.permanentMargin();
         adder.setPermanentLimit(permanent);
         for (TemporaryTier tier : cfg.temporaryTiers()) {
             adder.beginTemporaryLimit()
@@ -305,44 +426,64 @@ public final class CurrentLimitsGenerator {
      */
     public static LoadingReport loadingReport(Network network, String groupName,
                                               boolean runLoadFlow) {
+        return loadingReport(network, groupName, runLoadFlow, LimitType.CURRENT);
+    }
+
+    /**
+     * Load-flow each branch side against the permanent limit of {@code limitType}
+     * stored in {@code groupName} (see {@link #loadingReport(Network, String,
+     * boolean)}).
+     */
+    public static LoadingReport loadingReport(Network network, String groupName,
+                                              boolean runLoadFlow, LimitType limitType) {
         if (runLoadFlow) {
             runAcOrThrow(network, null);
         }
         Counters c = new Counters();
         double[] max = {0.0};
         for (Line line : network.getLines()) {
-            checkLoading(line.getOperationalLimitsGroup1(groupName), line.getTerminal1().getI(), c, max);
-            checkLoading(line.getOperationalLimitsGroup2(groupName), line.getTerminal2().getI(), c, max);
+            checkLoading(line.getOperationalLimitsGroup1(groupName), branchSides(line).get(0),
+                    limitType, c, max);
+            checkLoading(line.getOperationalLimitsGroup2(groupName), branchSides(line).get(1),
+                    limitType, c, max);
         }
         for (TwoWindingsTransformer tx : network.getTwoWindingsTransformers()) {
-            checkLoading(tx.getOperationalLimitsGroup1(groupName), tx.getTerminal1().getI(), c, max);
-            checkLoading(tx.getOperationalLimitsGroup2(groupName), tx.getTerminal2().getI(), c, max);
+            checkLoading(tx.getOperationalLimitsGroup1(groupName), branchSides(tx).get(0),
+                    limitType, c, max);
+            checkLoading(tx.getOperationalLimitsGroup2(groupName), branchSides(tx).get(1),
+                    limitType, c, max);
         }
         for (ThreeWindingsTransformer t3 : network.getThreeWindingsTransformers()) {
+            List<SideHandle> sides = legSides(t3);
+            int i = 0;
             for (ThreeWindingsTransformer.Leg leg : t3.getLegs()) {
-                checkLoading(leg.getOperationalLimitsGroup(groupName), leg.getTerminal().getI(), c, max);
+                checkLoading(leg.getOperationalLimitsGroup(groupName), sides.get(i++),
+                        limitType, c, max);
             }
         }
         for (BoundaryLine dl : network.getBoundaryLines()) {
-            checkLoading(dl.getOperationalLimitsGroup(groupName), dl.getTerminal().getI(), c, max);
+            checkLoading(dl.getOperationalLimitsGroup(groupName), boundarySide(dl),
+                    limitType, c, max);
         }
         return new LoadingReport(c.sides, c.sides > 0 ? max[0] : Double.NaN, c.overloaded);
     }
 
     private static void checkLoading(java.util.Optional<OperationalLimitsGroup> group,
-                                     double current, Counters c, double[] max) {
+                                     SideHandle side, LimitType limitType,
+                                     Counters c, double[] max) {
         if (group.isEmpty()) {
             return;
         }
-        var currentLimits = group.get().getCurrentLimits();
-        if (currentLimits.isEmpty() || !Double.isFinite(current)) {
+        var limits = group.get().getLoadingLimits(limitType);
+        double observed = sideValue(side, limitType);
+        if (limits.isEmpty() || !Double.isFinite(observed)) {
             return;
         }
-        double permanent = currentLimits.get().getPermanentLimit();
+        double permanent = limits.get().getPermanentLimit();
         if (!(permanent > 0)) {
             return;
         }
-        double loading = current / permanent;
+        double loading = observed / permanent;
         c.sides++;
         max[0] = Math.max(max[0], loading);
         if (loading > 1.0) {
@@ -390,6 +531,9 @@ public final class CurrentLimitsGenerator {
         if (!(cfg.permanentMargin() > 1.0)) {
             throw new IllegalArgumentException("permanentMargin must be > 1 (the permanent "
                     + "limit must sit above the base-case current)");
+        }
+        if (cfg.limitTypes() == null || cfg.limitTypes().isEmpty()) {
+            throw new IllegalArgumentException("limitTypes must not be empty");
         }
         java.util.Set<Integer> seen = new java.util.HashSet<>();
         for (TemporaryTier tier : cfg.temporaryTiers()) {
