@@ -87,6 +87,8 @@ def add_current_limits(
     only_missing: bool = False,
     select: bool = True,
     limit_types: Sequence[str] = DEFAULT_LIMIT_TYPES,
+    seasons: Optional[Dict[str, float]] = None,
+    selected_season: Optional[str] = None,
 ) -> dict:
     """Size and attach a current-limit set to every branch side from a load flow.
 
@@ -125,8 +127,18 @@ def add_current_limits(
         (side amps), ``"APPARENT_POWER"`` (``sqrt(P^2 + Q^2)`` in MVA) and/or
         ``"ACTIVE_POWER"`` (``|P|`` in MW). All share the same permanent margin
         and temporary tiers.
+    seasons
+        Optional ``{season_name: scale}`` map. When given, one operational-limit
+        group is created per season (named after the season) with all limits
+        multiplied by its scale - e.g. ``{"WINTER": 1.1, "SUMMER": 0.9}`` for the
+        higher cold-weather ratings. ``group_name`` is then ignored. When omitted,
+        a single ``group_name`` group is created (scale 1).
+    selected_season
+        Which season's group to mark active (defaults to the first season). Only
+        meaningful with ``seasons``.
     """
     _validate_config(permanent_margin, temporary_tiers, limit_types)
+    groups, active_group = _resolve_groups(group_name, seasons, selected_season)
 
     if run_loadflow:
         _run_ac_or_raise(network, lf_parameters)
@@ -134,7 +146,8 @@ def add_current_limits(
     skip = _elements_with_limits(network) if only_missing else set()
 
     stats = {
-        "group_name": group_name,
+        "group_name": active_group,
+        "groups": [name for name, _ in groups],
         "branches": 0,
         "sides": 0,
         "permanent_limits": 0,
@@ -171,11 +184,12 @@ def add_current_limits(
                     value = _side_value(elem, current_col, p_col, q_col, limit_type)
                     if not _is_usable(value, min_current):
                         continue
-                    rows.extend(_limit_rows(eid, side, float(value),
-                                            permanent_margin, temporary_tiers,
-                                            group_name, limit_type))
-                    stats["permanent_limits"] += 1
-                    stats["temporary_limits"] += len(temporary_tiers)
+                    for gname, scale in groups:
+                        rows.extend(_limit_rows(eid, side, float(value) * scale,
+                                                permanent_margin, temporary_tiers,
+                                                gname, limit_type))
+                    stats["permanent_limits"] += len(groups)
+                    stats["temporary_limits"] += len(groups) * len(temporary_tiers)
                     side_used = True
                 if not side_used:
                     type_stats["skipped_no_flow"] += 1
@@ -202,9 +216,23 @@ def add_current_limits(
         for updater, sel_by_col in selections.items():
             for group_col, ids in sel_by_col.items():
                 getattr(network, updater)(
-                    id=ids, **{group_col: [group_name] * len(ids)})
+                    id=ids, **{group_col: [active_group] * len(ids)})
 
     return stats
+
+
+def _resolve_groups(group_name: str, seasons: Optional[Dict[str, float]],
+                    selected_season: Optional[str]):
+    """Return ([(group_name, scale), ...], active_group_name)."""
+    if not seasons:
+        return [(group_name, 1.0)], group_name
+    for season, scale in seasons.items():
+        if not scale > 0:
+            raise ValueError(f"season scale for {season} must be positive")
+    active = selected_season if selected_season is not None else next(iter(seasons))
+    if active not in seasons:
+        raise ValueError(f"selected_season {active!r} is not one of {sorted(seasons)}")
+    return list(seasons.items()), active
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +424,20 @@ def _parse_tiers(text: str) -> Tuple[Tuple[int, float], ...]:
     return tuple(tiers)
 
 
+def _parse_seasons(text: Optional[str]) -> Optional[Dict[str, float]]:
+    """Parse 'WINTER:1.1,SUMMER:0.9' into a {season: scale} map (None if empty)."""
+    if not text:
+        return None
+    seasons = {}
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, scale = part.split(":")
+        seasons[name.strip()] = float(scale)
+    return seasons
+
+
 def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Create operational current-limit sets on every branch of a "
@@ -417,6 +459,11 @@ def _main(argv=None) -> int:
     parser.add_argument("--limit-types", default="CURRENT",
                         help="comma-separated limit types to size into the group: "
                              "CURRENT,APPARENT_POWER,ACTIVE_POWER (default: CURRENT)")
+    parser.add_argument("--seasons",
+                        help="create one group per season with scaled limits, "
+                             "e.g. 'WINTER:1.1,SUMMER:0.9' (default: single group)")
+    parser.add_argument("--selected-season",
+                        help="season group to make active (default: first)")
     parser.add_argument("--no-transformers", action="store_true",
                         help="do not size limits on transformers")
     parser.add_argument("--no-boundary-lines", action="store_true",
@@ -444,8 +491,12 @@ def _main(argv=None) -> int:
         only_missing=args.only_missing,
         select=not args.no_select,
         limit_types=tuple(t.strip() for t in args.limit_types.split(",") if t.strip()),
+        seasons=_parse_seasons(args.seasons),
+        selected_season=args.selected_season,
     )
-    print(f"Group '{stats['group_name']}': limits on {stats['branches']} branch(es), "
+    groups_note = (f" in groups {stats['groups']}, active '{stats['group_name']}'"
+                   if len(stats["groups"]) > 1 else f" '{stats['group_name']}'")
+    print(f"Group{groups_note}: limits on {stats['branches']} branch(es), "
           f"{stats['sides']} side(s) "
           f"({stats['permanent_limits']} permanent + "
           f"{stats['temporary_limits']} temporary).")
