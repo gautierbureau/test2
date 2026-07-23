@@ -45,6 +45,14 @@ DEFAULT_DROOP = 4.0  # percent
 DEFAULT_GENERATOR_POWER_FACTOR = 0.85  # rated_s = maxP / power factor
 DEFAULT_TRANSFORMER_LOADING = 0.6  # base-case apparent flow as a share of rated_s
 
+# Representative European installed-capacity split (shares need not sum to 1).
+DEFAULT_GENERATION_MIX = {
+    "NUCLEAR": 0.15, "THERMAL": 0.35, "HYDRO": 0.20, "WIND": 0.20, "SOLAR": 0.10,
+}
+# Order the mix is laid down in, from the largest units to the smallest.
+_MIX_ORDER = ["NUCLEAR", "THERMAL", "HYDRO", "WIND", "SOLAR", "OTHER"]
+_VALID_ENERGY_SOURCES = {"HYDRO", "NUCLEAR", "WIND", "THERMAL", "SOLAR", "OTHER"}
+
 
 # ---------------------------------------------------------------------------
 # Reactive limits
@@ -234,9 +242,8 @@ def set_generator_energy_source(
     whose energy source is ``OTHER`` (the IIDM "unset" value) are set to
     ``energy_source``. With ``only_undefined=False`` every generator is set.
     """
-    valid = {"HYDRO", "NUCLEAR", "WIND", "THERMAL", "SOLAR", "OTHER"}
-    if energy_source not in valid:
-        raise ValueError(f"energy_source must be one of {sorted(valid)}")
+    if energy_source not in _VALID_ENERGY_SOURCES:
+        raise ValueError(f"energy_source must be one of {sorted(_VALID_ENERGY_SOURCES)}")
 
     gens = network.get_generators(all_attributes=True)
     stats = {"generators": len(gens), "set": 0, "skipped_defined": 0}
@@ -252,6 +259,85 @@ def set_generator_energy_source(
                                   energy_source=[energy_source] * len(target))
         stats["set"] = len(target)
     return stats
+
+
+def set_generation_mix(
+    network: pn.Network,
+    mix: Optional[dict] = None,
+    only_undefined: bool = True,
+) -> dict:
+    """Assign a realistic energy-source mix across the generation fleet.
+
+    Fuel type cannot be inferred from a load flow, so this lays down a
+    representative installed-capacity distribution instead of a single default:
+    generators are ranked by active-power capability and the largest units are
+    given the base-load sources (nuclear, thermal), the smallest the
+    intermittent ones (wind, solar), so the shares in ``mix`` are met by
+    capacity. Deterministic (no randomness).
+
+    ``mix`` maps energy source -> share (need not sum to 1; default is a
+    representative European split). With ``only_undefined`` (the default) only
+    generators whose source is ``OTHER`` are assigned.
+    """
+    mix = dict(mix if mix is not None else DEFAULT_GENERATION_MIX)
+    if not mix:
+        raise ValueError("mix must not be empty")
+    for source, weight in mix.items():
+        if source not in _VALID_ENERGY_SOURCES:
+            raise ValueError(f"unknown energy source in mix: {source}")
+        if not weight > 0:
+            raise ValueError(f"mix weight for {source} must be positive")
+
+    gens = network.get_generators(all_attributes=True)
+    stats = {"generators": len(gens), "assigned": 0,
+             "skipped_defined": 0, "by_source": {}}
+    if gens.empty:
+        return stats
+    if only_undefined:
+        candidates = [g for g in gens.index if gens.at[g, "energy_source"] == "OTHER"]
+        stats["skipped_defined"] = len(gens) - len(candidates)
+    else:
+        candidates = list(gens.index)
+    if not candidates:
+        return stats
+
+    sources = [s for s in _MIX_ORDER if s in mix]
+    sources += [s for s in mix if s not in sources]
+    total_weight = sum(mix[s] for s in sources)
+
+    caps = {g: _gen_capacity(gens.loc[g]) for g in candidates}
+    ordered = sorted(candidates, key=lambda g: (-caps[g], g))
+    total_cap = sum(caps.values())
+
+    # Cumulative capacity boundary each source must reach, largest units first.
+    boundaries, running = [], 0.0
+    for source in sources:
+        running += mix[source] / total_weight
+        boundaries.append((source, running * (total_cap if total_cap > 0 else len(ordered))))
+
+    assigned = {}
+    cum, cursor = 0.0, 0
+    for g in ordered:
+        cum += caps[g] if total_cap > 0 else 1.0
+        while cursor < len(boundaries) - 1 and cum > boundaries[cursor][1]:
+            cursor += 1
+        assigned[g] = boundaries[cursor][0]
+
+    for source in sources:
+        ids = [g for g in ordered if assigned[g] == source]
+        if ids:
+            network.update_generators(id=ids, energy_source=[source] * len(ids))
+            stats["by_source"][source] = len(ids)
+            stats["assigned"] += len(ids)
+    return stats
+
+
+def _gen_capacity(g) -> float:
+    """Generator active-power capability (MW), falling back off a placeholder maxP."""
+    p = g["max_p"]
+    if not (math.isfinite(p) and 0 < abs(p) < DEFAULT_PLACEHOLDER_THRESHOLD):
+        p = g["target_p"]
+    return abs(p) if (math.isfinite(p) and p > 0) else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -351,14 +437,12 @@ def add_rated_s(
         if only_missing and math.isfinite(g["rated_s"]) and g["rated_s"] > 0:
             stats["generators_skipped_existing"] += 1
             continue
-        p = g["max_p"]
-        if not (math.isfinite(p) and 0 < abs(p) < DEFAULT_PLACEHOLDER_THRESHOLD):
-            p = g["target_p"]
-        if not (math.isfinite(p) and p > 0):
+        capacity = _gen_capacity(g)
+        if capacity <= 0:
             stats["generators_unsizable"] += 1
             continue
         gids.append(gid)
-        gvals.append(abs(p) / generator_power_factor)
+        gvals.append(capacity / generator_power_factor)
     if gids:
         network.update_generators(id=gids, rated_s=gvals)
         stats["generators_set"] = len(gids)
@@ -441,8 +525,10 @@ def _main(argv=None) -> int:
                         help="fill missing/placeholder generator reactive limits")
     parser.add_argument("--ratio-tap-changers", action="store_true",
                         help="add regulating ratio tap changers where missing")
+    parser.add_argument("--generation-mix", action="store_true",
+                        help="assign a realistic energy-source mix (default when no flag)")
     parser.add_argument("--energy-source", action="store_true",
-                        help="set energy source on generators that have none")
+                        help="set a single uniform energy source on generators that have none")
     parser.add_argument("--active-power-control", action="store_true",
                         help="add participation factors for distributed slack")
     parser.add_argument("--rated-s", action="store_true",
@@ -470,12 +556,15 @@ def _main(argv=None) -> int:
                              f"(default: {DEFAULT_TRANSFORMER_LOADING})")
     args = parser.parse_args(argv)
 
-    # With no explicit selection, run every completion.
+    # With no explicit selection, run every completion (using the realistic
+    # generation mix rather than the uniform energy source).
     selected = (args.reactive_limits or args.ratio_tap_changers
-                or args.energy_source or args.active_power_control or args.rated_s)
+                or args.energy_source or args.generation_mix
+                or args.active_power_control or args.rated_s)
     do_reactive = args.reactive_limits or not selected
     do_taps = args.ratio_tap_changers or not selected
-    do_energy = args.energy_source or not selected
+    do_mix = args.generation_mix or not selected
+    do_energy = args.energy_source  # uniform: only when explicitly requested
     do_apc = args.active_power_control or not selected
     do_rated_s = args.rated_s or not selected
 
@@ -495,6 +584,10 @@ def _main(argv=None) -> int:
         print(f"Ratio tap changers: added {t['added']} of {t['transformers']} "
               f"transformer(s) ({t['skipped_existing']} already had a tap changer, "
               f"{t['skipped_no_voltage']} without a base-case voltage).")
+    if do_mix:
+        m = set_generation_mix(network)
+        print(f"Generation mix: assigned {m['assigned']} of {m['generators']} generator(s) "
+              f"({m['skipped_defined']} already defined) -> {m['by_source']}.")
     if do_energy:
         e = set_generator_energy_source(network, energy_source=args.energy_source_value)
         print(f"Energy source: set {e['set']} of {e['generators']} generator(s) to "

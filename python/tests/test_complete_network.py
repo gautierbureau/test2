@@ -17,6 +17,7 @@ from complete_network import (
     add_rated_s,
     add_ratio_tap_changers,
     add_reactive_limits,
+    set_generation_mix,
     set_generator_energy_source,
 )
 from tests.test_bus_to_node_breaker import _extended_ieee14
@@ -175,6 +176,33 @@ def test_energy_source_rejects_bad_value():
     net = pn.create_ieee14()
     with pytest.raises(ValueError):
         set_generator_energy_source(net, energy_source="COAL")
+
+
+def test_generation_mix_assigns_by_size():
+    net = pn.create_ieee14()
+    # Distinct capabilities so the size ranking is unambiguous.
+    net.update_generators(id=["B1-G", "B2-G", "B3-G", "B6-G", "B8-G"],
+                          max_p=[500.0, 400.0, 300.0, 200.0, 100.0])
+    stats = set_generation_mix(
+        net, mix={"NUCLEAR": 0.4, "HYDRO": 0.3, "SOLAR": 0.3})
+    assert stats["assigned"] == 5
+    src = net.get_generators(all_attributes=True)["energy_source"]
+    # Largest unit is base-load (nuclear), smallest is intermittent (solar).
+    assert src["B1-G"] == "NUCLEAR"
+    assert src["B8-G"] == "SOLAR"
+    assert set(src) <= {"NUCLEAR", "HYDRO", "SOLAR"}
+
+
+def test_generation_mix_only_undefined_and_reject_bad():
+    net = pn.create_ieee14()
+    net.update_generators(id=["B1-G"], energy_source=["WIND"])
+    stats = set_generation_mix(net)
+    assert stats["skipped_defined"] == 1
+    assert net.get_generators(all_attributes=True).loc["B1-G", "energy_source"] == "WIND"
+    with pytest.raises(ValueError):
+        set_generation_mix(net, mix={"COAL": 1.0})
+    with pytest.raises(ValueError):
+        set_generation_mix(net, mix={"NUCLEAR": -1.0})
 
 
 def test_active_power_control_added_with_participation():
