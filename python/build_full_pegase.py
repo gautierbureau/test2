@@ -2,16 +2,23 @@
 Build a fully-enhanced network in one pass.
 
 Loads a case (e.g. a raw PEGASE snapshot, which ships with almost no operational
-data), optionally converts it to a node-breaker topology, runs a single AC load
-flow, then applies every completion in this repo - reactive limits, ratio tap
-changers, a realistic generation mix, apparent-power ratings, active power
-control, synthetic measurements, observability flags and load-flow-based
-current + apparent-power limit sets - and writes the result.
+data), runs a single AC load flow, applies every completion in this repo -
+reactive limits, ratio tap changers, a realistic generation mix, apparent-power
+ratings, active power control, synthetic measurements, observability flags and
+load-flow-based current + apparent-power limit sets - and, by default, rebuilds
+the result as a node-breaker network (busbar sections + switches) so it looks
+like a real one.
 
-The output is a network that exercises most of the IIDM object types and
-extensions, useful as a realistic reference to compare synthetic networks
-against (see network_summary.py). Real networks are node-breaker (busbar
-sections + switches), so that conversion is on by default.
+The output exercises most of the IIDM object types and extensions, useful as a
+realistic reference to compare synthetic networks against (see
+network_summary.py).
+
+The completions run on the (converging) bus-breaker network and the node-breaker
+conversion is done last: the rebuilt topology loses the source's solved voltage
+profile, and a flat-start load flow does not reconverge on very large cases
+(e.g. ACTIVSg70k), so re-solving the node-breaker model is avoided. The
+converter carries operational limits and element-keyed extensions across; the
+measurements and observability extensions it does not copy are re-attached here.
 """
 
 from __future__ import annotations
@@ -26,20 +33,37 @@ import bus_to_node_breaker as b2nb
 import complete_network as cn
 
 
+def _reattach_measurements(src: pn.Network, dst: pn.Network) -> None:
+    """Copy the measurements extension across a rebuild (converter skips it)."""
+    df = src.get_extensions("measurements")
+    if df.empty:
+        return
+    # pypowsybl transposes value/standard_deviation on create, so pass them
+    # swapped; injection rows carry no side, branch rows do (a mixed empty/side
+    # column trips the ThreeSides enum), so create the two groups separately.
+    base = df.assign(value=df["standard_deviation"], standard_deviation=df["value"])
+    inj = base[base["side"] == ""]
+    if not inj.empty:
+        dst.create_extensions("measurements", inj.drop(columns=["side"]))
+    branch = base[base["side"] != ""]
+    if not branch.empty:
+        dst.create_extensions("measurements", branch)
+
+
+def _reattach_observability(src: pn.Network, dst: pn.Network) -> None:
+    """Copy the observability extensions across a rebuild (converter skips them)."""
+    for name in ("injectionObservability", "branchObservability"):
+        df = src.get_extensions(name)
+        if df.empty:
+            continue
+        # Drop pypowsybl's internal *_null nullability markers before recreating.
+        dst.create_extensions(name, df[[c for c in df.columns if not c.endswith("_null")]])
+
+
 def build_full(input_path: str, output_path: str,
                node_breaker: bool = True) -> pn.Network:
     """Apply every enhancement to the network at ``input_path`` and save it."""
     net = pn.load(input_path)
-
-    if node_breaker:
-        # Real networks are node-breaker; rebuild the (bus-breaker) case as an
-        # electrically identical node-breaker model first, so busbar sections,
-        # switches and their position extensions are present and every later
-        # completion lands on the node-breaker topology.
-        net = b2nb.convert(net)
-        print(f"node-breaker            : {len(net.get_busbar_sections())} busbar "
-              f"section(s), {len(net.get_switches())} switch(es)")
-
     cn._run_ac_or_raise(net, None)  # one load flow shared by every step
 
     steps = [
@@ -57,6 +81,16 @@ def build_full(input_path: str, output_path: str,
     for name, step in steps:
         result = step()
         print(f"{name:24s}: {result}")
+
+    if node_breaker:
+        # Rebuild as node-breaker last, then carry over the two extensions the
+        # converter does not copy.
+        nb = b2nb.convert(net)
+        _reattach_measurements(net, nb)
+        _reattach_observability(net, nb)
+        net = nb
+        print(f"node-breaker            : {len(net.get_busbar_sections())} busbar "
+              f"section(s), {len(net.get_switches())} switch(es)")
 
     net.save(output_path, format="XIIDM")
     print(f"Wrote {output_path}")
