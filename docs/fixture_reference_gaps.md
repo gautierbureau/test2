@@ -71,11 +71,11 @@ TIE_LINE, VOLTAGE_ANGLE_LIMITS, VOLTAGE_SOURCE_CONVERTER.
 | position | 38,124 | 59,324 | ok |
 | voltageRegulation | 27 | 47 | ok |
 | generatorShortCircuit | 6,900 | 4,092 | ok |
+| hvdcAngleDroopActivePowerControl | 6 | 11 | ok |
+| hvdcOperatorActivePowerRange | 4 | 11 | ok |
 | identifiableShortCircuit | 6,808 | 8,354 | ok |
+| standbyAutomaton | 7 | 12 | ok |
 | coordinatedReactiveControl | 110 | 0 | GAP |
-| hvdcAngleDroopActivePowerControl | 6 | 0 | GAP |
-| hvdcOperatorActivePowerRange | 4 | 0 | GAP |
-| standbyAutomaton | 7 | 0 | GAP |
 | congestionManagement | 27 | — | — |
 | currentLimitsPerSeason | 732,839 | — | — |
 | stateOfCharge | 20 | — | — |
@@ -113,9 +113,10 @@ voltagePerReactivePowerControl.
   **`VSC_CONVERTER_STATION`** (12) — done in `add_equipment.py`: sparse,
   electrically-neutral synthetic devices injected before the load flow and
   carried across the node-breaker conversion (PEGASE now 47/12/11/22,
-  ACTIVSg70k 235/61/52/104). Their HVDC/storage extensions
-  (`hvdcAngleDroopActivePowerControl`, `hvdcOperatorActivePowerRange`,
-  `standbyAutomaton`, `stateOfCharge`) are still not set.
+  ACTIVSg70k 235/61/52/104). Their control extensions are also set:
+  `hvdcAngleDroopActivePowerControl` + `hvdcOperatorActivePowerRange` per HVDC
+  link and `standbyAutomaton` per SVC. (`stateOfCharge` on batteries is not
+  registered in pypowsybl — see section C.)
 - [x] **`REACTIVE_CAPABILITY_CURVE_POINT`** (13,937) — done:
   `complete_network.add_reactive_capability_curves` gives every generator a
   3-point P-dependent capability curve (armature circle, floored, never narrower
