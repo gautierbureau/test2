@@ -29,6 +29,7 @@ import sys
 import pypowsybl.network as pn
 
 import add_current_limits as acl
+import add_equipment as eq
 import bus_to_node_breaker as b2nb
 import complete_network as cn
 
@@ -64,6 +65,12 @@ def build_full(input_path: str, output_path: str,
                node_breaker: bool = True) -> pn.Network:
     """Apply every enhancement to the network at ``input_path`` and save it."""
     net = pn.load(input_path)
+
+    # Inject synthetic equipment the source cases lack (batteries, SVCs, HVDC
+    # links) before the load flow; they are created electrically neutral, so the
+    # base case is unchanged.
+    print(f"equipment               : {eq.add_equipment(net)}")
+
     cn._run_ac_or_raise(net, None)  # one load flow shared by every step
 
     steps = [
