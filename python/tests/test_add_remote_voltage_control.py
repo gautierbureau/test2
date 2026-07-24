@@ -14,7 +14,7 @@ def _nb_ieee14():
 def test_deported_generator_regulates_hv_bus_remotely():
     net = _nb_ieee14()
     # IEEE-14 tops out at 135 kV, so lower the threshold for the test.
-    stats = deport_generators(net, count=1, hv_threshold=100.0)
+    net, stats = deport_generators(net, count=1, hv_threshold=100.0)
     assert stats["deported"] == 1
     g = net.get_generators(all_attributes=True)
     gid = next(x for x in g.index if g.at[x, "voltage_level_id"].endswith("_GSU_VL"))
@@ -28,7 +28,7 @@ def test_deported_generator_regulates_hv_bus_remotely():
 
 def test_deportation_keeps_convergence():
     net = _nb_ieee14()
-    deport_generators(net, count=2, hv_threshold=100.0)
+    net, _ = deport_generators(net, count=2, hv_threshold=100.0)
     res = lf.run_ac(net, lf.Parameters(
         distributed_slack=True, use_reactive_limits=True,
         voltage_init_mode=lf.VoltageInitMode.DC_VALUES))
@@ -38,4 +38,5 @@ def test_deportation_keeps_convergence():
 def test_no_eligible_generators_is_a_noop():
     net = _nb_ieee14()
     # No bus at/above 400 kV in IEEE-14.
-    assert deport_generators(net, hv_threshold=400.0)["deported"] == 0
+    _, stats = deport_generators(net, hv_threshold=400.0)
+    assert stats["deported"] == 0

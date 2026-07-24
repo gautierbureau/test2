@@ -130,7 +130,8 @@ def build_full(input_path: str, output_path: str,
 
         # Remote voltage control: deport some EHV generators behind a new GSU
         # transformer (node-breaker, feeder bays) regulating the HV bus remotely.
-        print(f"remote voltage control  : {rvc.deport_generators(net)}")
+        net, rvc_stats = rvc.deport_generators(net)
+        print(f"remote voltage control  : {rvc_stats}")
 
     # Solve the finished network with a DC-based voltage init so the fixture is
     # saved in (and reported as) a converged state. A flat start does not
