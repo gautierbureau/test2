@@ -537,6 +537,72 @@ def add_discrete_measurements(network: pn.Network, only_missing: bool = True) ->
 
 
 # ---------------------------------------------------------------------------
+# Element properties (free-form string key/value tags)
+# ---------------------------------------------------------------------------
+
+DEFAULT_REGION_COUNT = 10
+DEFAULT_COUNTRY = "XX"
+
+
+def _voltage_class(nominal_v: float) -> str:
+    if nominal_v >= 300.0:
+        return "EHV"
+    if nominal_v >= 100.0:
+        return "HV"
+    if nominal_v >= 1.0:
+        return "MV"
+    return "LV"
+
+
+def add_properties(
+    network: pn.Network,
+    region_count: int = DEFAULT_REGION_COUNT,
+    country: str = DEFAULT_COUNTRY,
+    only_missing: bool = True,
+) -> dict:
+    """Tag substations and voltage levels with representative string properties.
+
+    IIDM properties are free-form string key/value pairs; real (often
+    CGMES-sourced) networks carry geographic/operational tags. A load flow cannot
+    infer them, so this lays down a deterministic set:
+
+    - each **substation** gets ``region`` (partitioned into ``region_count`` zones
+      by sorted id) and ``country_code``;
+    - each **voltage level** gets ``voltage_class`` (EHV/HV/MV/LV from nominal kV).
+
+    Keys deliberately avoid native IIDM attribute names (``country``, ``name``,
+    ``TSO``) so they don't collide when the network is rebuilt. With
+    ``only_missing`` elements that already carry any property are left alone.
+    """
+    if region_count < 1:
+        raise ValueError("region_count must be >= 1")
+    skip = set()
+    if only_missing:
+        props = network.get_elements_properties()
+        if not props.empty:
+            skip = set(props.index)
+
+    stats = {"substations": 0, "voltage_levels": 0}
+
+    subs = [s for s in sorted(network.get_substations().index) if s not in skip]
+    if subs:
+        network.add_elements_properties(
+            id=subs,
+            region=[f"REGION_{i % region_count:02d}" for i in range(len(subs))],
+            country_code=[country] * len(subs))
+        stats["substations"] = len(subs)
+
+    vls = network.get_voltage_levels()
+    vids = [v for v in sorted(vls.index) if v not in skip]
+    if vids:
+        network.add_elements_properties(
+            id=vids,
+            voltage_class=[_voltage_class(float(vls.at[v, "nominal_v"])) for v in vids])
+        stats["voltage_levels"] = len(vids)
+    return stats
+
+
+# ---------------------------------------------------------------------------
 # Active power control (participation factors)
 # ---------------------------------------------------------------------------
 

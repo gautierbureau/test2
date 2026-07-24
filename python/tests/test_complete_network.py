@@ -18,6 +18,7 @@ from complete_network import (
     add_load_detail,
     add_measurements,
     add_observability,
+    add_properties,
     add_rated_s,
     add_ratio_tap_changers,
     add_reactive_limits,
@@ -332,6 +333,23 @@ def test_discrete_measurements_on_tap_changers():
     assert set(dm["tap_changer"]) == {"RATIO_TAP_CHANGER"}
     # Idempotent under only_missing.
     assert add_discrete_measurements(net)["measurements"] == 0
+
+
+def test_properties_tag_substations_and_voltage_levels():
+    net = pn.create_ieee14()
+    stats = add_properties(net, region_count=4, country="FR")
+    assert stats["substations"] == len(net.get_substations())
+    assert stats["voltage_levels"] == len(net.get_voltage_levels())
+    props = net.get_elements_properties()
+    assert set(props["key"]) == {"region", "country_code", "voltage_class"}
+    assert set(props[props["key"] == "country_code"]["value"]) == {"FR"}
+    # Region partitioned into at most region_count zones; voltage class sensible.
+    assert len(set(props[props["key"] == "region"]["value"])) <= 4
+    assert set(props[props["key"] == "voltage_class"]["value"]) <= {"EHV", "HV", "MV", "LV"}
+    # Keys avoid the native substation 'country' field, so a rebuild still works.
+    assert "country" not in set(props["key"])
+    # Idempotent under only_missing.
+    assert add_properties(net) == {"substations": 0, "voltage_levels": 0}
 
 
 def test_measurements_reject_bad_std():
