@@ -49,7 +49,7 @@ don't · `—` = not registered in our pypowsybl (unreachable) · blank = zero i
 | STATIC_VAR_COMPENSATOR | 7 | 12 | ok |
 | VSC_CONVERTER_STATION | 12 | 22 | ok |
 | PROPERTIES | 137,858 | 25,062 | ok |
-| REACTIVE_CAPABILITY_CURVE_POINT | 13,937 | 0 | GAP |
+| REACTIVE_CAPABILITY_CURVE_POINT | 13,937 | 12,276 | ok |
 
 Zero in both (omitted from work): ALIAS, AREA, AREA_BOUNDARIES,
 AREA_VOLTAGE_LEVELS, BOUNDARY_LINE, BOUNDARY_LINE_GENERATION, DC_BUS, DC_GROUND,
@@ -116,9 +116,10 @@ voltagePerReactivePowerControl.
   ACTIVSg70k 235/61/52/104). Their HVDC/storage extensions
   (`hvdcAngleDroopActivePowerControl`, `hvdcOperatorActivePowerRange`,
   `standbyAutomaton`, `stateOfCharge`) are still not set.
-- [ ] **`REACTIVE_CAPABILITY_CURVE_POINT`** (13,937) — our generators use MIN_MAX
-  bands; add an option in `complete_network.py` to lay down a piecewise reactive
-  **capability curve** instead of a flat band.
+- [x] **`REACTIVE_CAPABILITY_CURVE_POINT`** (13,937) — done:
+  `complete_network.add_reactive_capability_curves` gives every generator a
+  3-point P-dependent capability curve (armature circle, floored, never narrower
+  than the existing band). PEGASE 12,276; ACTIVSg70k 31,170.
 - [x] **`generatorShortCircuit`** / **`identifiableShortCircuit`** (6,900 / 6,808)
   — done: `complete_network.add_short_circuit` sets transient/subtransient
   reactances on generators and min/max fault current on voltage levels (PEGASE
