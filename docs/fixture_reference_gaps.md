@@ -70,9 +70,9 @@ TIE_LINE, VOLTAGE_ANGLE_LIMITS, VOLTAGE_SOURCE_CONVERTER.
 | measurements | 42,358 | 142,074 | ok |
 | position | 38,124 | 59,324 | ok |
 | voltageRegulation | 27 | 47 | ok |
+| generatorShortCircuit | 6,900 | 4,092 | ok |
+| identifiableShortCircuit | 6,808 | 8,354 | ok |
 | coordinatedReactiveControl | 110 | 0 | GAP |
-| generatorShortCircuit | 6,900 | 0 | GAP |
-| identifiableShortCircuit | 6,808 | 0 | GAP |
 | hvdcAngleDroopActivePowerControl | 6 | 0 | GAP |
 | hvdcOperatorActivePowerRange | 4 | 0 | GAP |
 | standbyAutomaton | 7 | 0 | GAP |
@@ -119,9 +119,10 @@ voltagePerReactivePowerControl.
 - [ ] **`REACTIVE_CAPABILITY_CURVE_POINT`** (13,937) — our generators use MIN_MAX
   bands; add an option in `complete_network.py` to lay down a piecewise reactive
   **capability curve** instead of a flat band.
-- [ ] **`generatorShortCircuit`** / **`identifiableShortCircuit`** (6,900 / 6,808)
-  — synthesize short-circuit data (transient reactance / min-max short-circuit
-  current) as a new completion.
+- [x] **`generatorShortCircuit`** / **`identifiableShortCircuit`** (6,900 / 6,808)
+  — done: `complete_network.add_short_circuit` sets transient/subtransient
+  reactances on generators and min/max fault current on voltage levels (PEGASE
+  4,092 / 8,354; ACTIVSg70k 10,390 / 65,263).
 - [ ] **`coordinatedReactiveControl`** (110) — set on a subset of generators in a
   coordinated voltage-control zone.
 
