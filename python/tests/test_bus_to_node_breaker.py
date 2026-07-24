@@ -237,6 +237,25 @@ def test_preserves_operational_limits_and_extensions():
     assert apc.loc["B1-G", "participation_factor"] == 100.0
 
 
+def test_busbar_sections_get_position_extension():
+    net = pn.create_ieee14()
+    target = convert(net)
+    pos = target.get_extensions("busbarSectionPosition")
+    bbs = target.get_busbar_sections()
+    # One position per busbar section.
+    assert len(pos) == len(bbs)
+    assert set(pos.index) == set(bbs.index)
+    # Sections are numbered from 1 within a voltage level.
+    assert pos["section_index"].min() == 1
+    assert (pos["busbar_index"] == 1).all()
+
+    # Copy properties across too, as a spot check on the same rebuild path.
+    net2 = pn.create_ieee14()
+    net2.add_elements_properties(id=["B1-G"], zone=["north"])
+    tgt2 = convert(net2)
+    assert tgt2.get_elements_properties().loc["B1-G", "value"] == "north"
+
+
 def test_rejects_node_breaker_input():
     # A network that is already node-breaker cannot be converted.
     node_breaker = convert(pn.create_ieee14())

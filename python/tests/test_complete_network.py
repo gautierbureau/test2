@@ -14,6 +14,8 @@ import pytest
 
 from complete_network import (
     add_active_power_control,
+    add_discrete_measurements,
+    add_load_detail,
     add_measurements,
     add_observability,
     add_rated_s,
@@ -300,6 +302,36 @@ def test_observability_flags():
     # Idempotent under only_missing.
     again = add_observability(net)
     assert again["injections"] == 0 and again["branches"] == 0
+
+
+def test_load_detail_splits_fixed_and_variable():
+    net = pn.create_ieee14()
+    stats = add_load_detail(net, fixed_fraction=0.4)
+    assert stats["set"] == len(net.get_loads())
+    det = net.get_extensions("detail")
+    loads = net.get_loads()
+    lid = loads.index[0]
+    p0 = loads.at[lid, "p0"]
+    assert det.at[lid, "fixed_p0"] == pytest.approx(0.4 * p0)
+    assert det.at[lid, "variable_p0"] == pytest.approx(0.6 * p0)
+    # Fixed + variable reconstruct the original setpoint.
+    assert det.at[lid, "fixed_p0"] + det.at[lid, "variable_p0"] == pytest.approx(p0)
+    # Idempotent under only_missing.
+    assert add_load_detail(net)["set"] == 0
+    with pytest.raises(ValueError):
+        add_load_detail(pn.create_ieee14(), fixed_fraction=1.5)
+
+
+def test_discrete_measurements_on_tap_changers():
+    net = pn.create_ieee14()
+    add_ratio_tap_changers(net)
+    stats = add_discrete_measurements(net)
+    assert stats["measurements"] == len(net.get_ratio_tap_changers())
+    dm = net.get_extensions("discreteMeasurements")
+    assert set(dm["type"]) == {"TAP_POSITION"}
+    assert set(dm["tap_changer"]) == {"RATIO_TAP_CHANGER"}
+    # Idempotent under only_missing.
+    assert add_discrete_measurements(net)["measurements"] == 0
 
 
 def test_measurements_reject_bad_std():

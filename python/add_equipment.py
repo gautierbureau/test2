@@ -57,7 +57,11 @@ def _count(network: pn.Network, count: Optional[int], rate: float) -> int:
 
 def add_batteries(network: pn.Network, count: Optional[int] = None,
                   power_mw: float = 25.0) -> dict:
-    """Add sparse grid-storage batteries (idle: target P/Q = 0)."""
+    """Add sparse grid-storage batteries (idle: target P/Q = 0).
+
+    Each battery also gets the ``voltageRegulation`` extension (regulator off,
+    so neutral) to mirror how real storage records its voltage-control mode.
+    """
     n = _count(network, count, DEFAULT_BATTERY_RATE)
     hosts = _evenly_spaced(_host_buses(network), n)
     if not hosts:
@@ -70,6 +74,9 @@ def add_batteries(network: pn.Network, count: Optional[int] = None,
         target_p=[0.0] * len(hosts), target_q=[0.0] * len(hosts))
     network.create_minmax_reactive_limits(
         id=ids, min_q=[-power_mw] * len(hosts), max_q=[power_mw] * len(hosts))
+    network.create_extensions(
+        "voltageRegulation", id=ids, voltage_regulator_on=[False] * len(ids),
+        target_v=[float("nan")] * len(ids), regulated_element_id=[""] * len(ids))
     return {"added": len(ids)}
 
 

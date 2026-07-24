@@ -61,6 +61,13 @@ def _reattach_observability(src: pn.Network, dst: pn.Network) -> None:
         dst.create_extensions(name, df[[c for c in df.columns if not c.endswith("_null")]])
 
 
+def _reattach_discrete_measurements(src: pn.Network, dst: pn.Network) -> None:
+    """Copy the discreteMeasurements extension across a rebuild (element_id-keyed)."""
+    df = src.get_extensions("discreteMeasurements")
+    if not df.empty:
+        dst.create_extensions("discreteMeasurements", df)
+
+
 def build_full(input_path: str, output_path: str,
                node_breaker: bool = True) -> pn.Network:
     """Apply every enhancement to the network at ``input_path`` and save it."""
@@ -79,7 +86,9 @@ def build_full(input_path: str, output_path: str,
         ("generation mix", lambda: cn.set_generation_mix(net)),
         ("rated_s", lambda: cn.add_rated_s(net, run_loadflow=False)),
         ("active power control", lambda: cn.add_active_power_control(net)),
+        ("load detail", lambda: cn.add_load_detail(net)),
         ("measurements", lambda: cn.add_measurements(net, run_loadflow=False)),
+        ("discrete measurements", lambda: cn.add_discrete_measurements(net)),
         ("observability", lambda: cn.add_observability(net)),
         ("current + apparent limits",
          lambda: acl.add_current_limits(net, run_loadflow=False,
@@ -90,11 +99,12 @@ def build_full(input_path: str, output_path: str,
         print(f"{name:24s}: {result}")
 
     if node_breaker:
-        # Rebuild as node-breaker last, then carry over the two extensions the
-        # converter does not copy.
+        # Rebuild as node-breaker last, then carry over the element_id-keyed
+        # extensions the converter does not copy.
         nb = b2nb.convert(net)
         _reattach_measurements(net, nb)
         _reattach_observability(net, nb)
+        _reattach_discrete_measurements(net, nb)
         net = nb
         print(f"node-breaker            : {len(net.get_busbar_sections())} busbar "
               f"section(s), {len(net.get_switches())} switch(es)")

@@ -465,6 +465,78 @@ def _elements_with_extension(network: pn.Network, name: str) -> set:
 
 
 # ---------------------------------------------------------------------------
+# Load detail (fixed vs variable P/Q split)
+# ---------------------------------------------------------------------------
+
+DEFAULT_LOAD_FIXED_FRACTION = 0.4  # share of a load that is constant (rest varies)
+
+
+def add_load_detail(
+    network: pn.Network,
+    fixed_fraction: float = DEFAULT_LOAD_FIXED_FRACTION,
+    only_missing: bool = True,
+) -> dict:
+    """Split each load's P/Q into a fixed and a variable part (``detail`` extension).
+
+    Real load records distinguish a constant component from a
+    voltage/time-varying one; a load flow cannot infer the split, so this applies
+    a representative constant ``fixed_fraction`` (default 40 % fixed, 60 %
+    variable) to every load's ``p0``/``q0``.
+    """
+    if not 0.0 <= fixed_fraction <= 1.0:
+        raise ValueError("fixed_fraction must be in [0, 1]")
+    loads = network.get_loads(all_attributes=True)
+    skip = _elements_with_extension(network, "detail") if only_missing else set()
+    loads = loads[~loads.index.isin(skip)]
+    if loads.empty:
+        return {"loads": 0, "set": 0}
+    var = 1.0 - fixed_fraction
+    df = pd.DataFrame({
+        "id": list(loads.index),
+        "fixed_p0": [fixed_fraction * p for p in loads["p0"]],
+        "variable_p0": [var * p for p in loads["p0"]],
+        "fixed_q0": [fixed_fraction * q for q in loads["q0"]],
+        "variable_q0": [var * q for q in loads["q0"]],
+    }).set_index("id")
+    network.create_extensions("detail", df)
+    return {"loads": len(loads), "set": len(df)}
+
+
+# ---------------------------------------------------------------------------
+# Discrete measurements (tap-changer positions)
+# ---------------------------------------------------------------------------
+
+def add_discrete_measurements(network: pn.Network, only_missing: bool = True) -> dict:
+    """Attach a discrete tap-position measurement to every tap changer.
+
+    Sets the ``discreteMeasurements`` extension with the current tap position of
+    each ratio and phase tap changer (the discrete counterpart of the analog
+    ``measurements`` extension). Keyed by the transformer id.
+    """
+    skip = _elements_with_extension(network, "discreteMeasurements") if only_missing else set()
+    rows = []
+    for getter, kind in (("get_ratio_tap_changers", "RATIO_TAP_CHANGER"),
+                         ("get_phase_tap_changers", "PHASE_TAP_CHANGER")):
+        tcs = getattr(network, getter)()
+        for idx, row in tcs.iterrows():
+            eid = idx[0] if isinstance(idx, tuple) else idx
+            side = idx[1] if isinstance(idx, tuple) else None
+            if eid in skip:
+                continue
+            suffix = f"{kind}_{side}" if side else kind
+            rows.append({
+                "element_id": eid, "id": f"{eid}_{suffix}_POS",
+                "type": "TAP_POSITION", "tap_changer": kind,
+                "value_type": "INT", "value": str(int(row["tap"])), "valid": True,
+            })
+    if not rows:
+        return {"measurements": 0}
+    network.create_extensions("discreteMeasurements",
+                              pd.DataFrame(rows).set_index("element_id"))
+    return {"measurements": len(rows)}
+
+
+# ---------------------------------------------------------------------------
 # Active power control (participation factors)
 # ---------------------------------------------------------------------------
 

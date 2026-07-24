@@ -139,6 +139,7 @@ def convert(source: pn.Network, busbar_sections_per_bus: int = 1,
     _copy_operational_limits(source, target)
     _copy_extensions(source, target)
     _copy_properties(source, target)
+    _set_busbar_section_positions(target)
 
     return target
 
@@ -691,6 +692,29 @@ def _copy_properties(source: pn.Network, target: pn.Network) -> None:
             continue
         target.add_elements_properties(
             id=list(sub.index), **{key: [str(v) for v in sub["value"]]})
+
+
+def _set_busbar_section_positions(target: pn.Network) -> None:
+    """Give every rebuilt busbar section a ``busbarSectionPosition`` extension.
+
+    Node-breaker models tag each busbar section with a (busbar, section) index
+    for single-line-diagram layout. The rebuild creates the sections without it,
+    so number them per voltage level: one busbar, sections 1..k.
+    """
+    bbs = target.get_busbar_sections(all_attributes=True)
+    if bbs.empty:
+        return
+    section_of = {}
+    ids, busbar_index, section_index = [], [], []
+    for bid, b in bbs.sort_index().iterrows():
+        vl = b["voltage_level_id"]
+        nxt = section_of.get(vl, 0) + 1
+        section_of[vl] = nxt
+        ids.append(bid)
+        busbar_index.append(1)
+        section_index.append(nxt)
+    target.create_extensions("busbarSectionPosition", id=ids,
+                             busbar_index=busbar_index, section_index=section_index)
 
 
 # ---------------------------------------------------------------------------

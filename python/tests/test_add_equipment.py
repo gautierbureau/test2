@@ -23,6 +23,15 @@ def test_batteries_added_with_reactive_limits():
     assert (bats["target_q"] == 0.0).all()
 
 
+def test_batteries_get_voltage_regulation_extension():
+    net = pn.create_ieee14()
+    add_batteries(net, count=3)
+    vr = net.get_extensions("voltageRegulation")
+    assert len(vr) == 3
+    # Regulator off -> declares the mode without disturbing the base case.
+    assert not vr["voltage_regulator_on"].any()
+
+
 def test_svcs_added_regulation_off():
     net = pn.create_ieee14()
     stats = add_static_var_compensators(net, count=3)
