@@ -40,6 +40,22 @@ def test_svcs_added_regulation_off():
     assert len(svcs) == 3
     # Regulation off -> electrically neutral.
     assert not svcs["regulating"].any()
+    # Each SVC gets a (neutral) standby automaton.
+    sa = net.get_extensions("standbyAutomaton")
+    assert len(sa) == 3
+    assert not sa["standby"].any()
+    assert (sa["low_voltage_threshold"] < sa["high_voltage_threshold"]).all()
+
+
+def test_hvdc_links_get_control_extensions():
+    net = pn.create_ieee14()
+    add_hvdc_links(net, count=2)
+    adpc = net.get_extensions("hvdcAngleDroopActivePowerControl")
+    opr = net.get_extensions("hvdcOperatorActivePowerRange")
+    assert len(adpc) == 2 and len(opr) == 2
+    # Angle-droop control declared but disabled -> neutral.
+    assert not adpc["enabled"].any()
+    assert (opr["opr_from_cs1_to_cs2"] > 0).all()
 
 
 def test_hvdc_links_add_two_stations_each():

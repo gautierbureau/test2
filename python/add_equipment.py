@@ -89,13 +89,20 @@ def add_static_var_compensators(network: pn.Network, count: Optional[int] = None
         return {"added": 0}
     nominal = network.get_voltage_levels()["nominal_v"]
     ids = [f"SYN_SVC_{i}" for i in range(len(hosts))]
+    target_v = [float(nominal[h[0]]) for h in hosts]
     network.create_static_var_compensators(
         id=ids,
         voltage_level_id=[h[0] for h in hosts], bus_id=[h[1] for h in hosts],
         b_min=[-susceptance] * len(hosts), b_max=[susceptance] * len(hosts),
         regulation_mode=["VOLTAGE"] * len(hosts), regulating=[False] * len(hosts),
-        target_v=[float(nominal[h[0]]) for h in hosts],
-        target_q=[0.0] * len(hosts))
+        target_v=target_v, target_q=[0.0] * len(hosts))
+    # standbyAutomaton: standby off (neutral); voltage thresholds around target.
+    network.create_extensions(
+        "standbyAutomaton", id=ids, standby=[False] * len(ids), b0=[0.0] * len(ids),
+        low_voltage_threshold=[0.90 * v for v in target_v],
+        low_voltage_setpoint=[0.95 * v for v in target_v],
+        high_voltage_threshold=[1.10 * v for v in target_v],
+        high_voltage_setpoint=[1.05 * v for v in target_v])
     return {"added": len(ids)}
 
 
@@ -128,13 +135,22 @@ def add_hvdc_links(network: pn.Network, count: Optional[int] = None,
     network.create_minmax_reactive_limits(
         id=vsc_ids, min_q=[-max_p / 2] * len(vsc_ids), max_q=[max_p / 2] * len(vsc_ids))
 
+    hvdc_ids = [f"SYN_HVDC_{i}" for i in range(links)]
     network.create_hvdc_lines(
-        id=[f"SYN_HVDC_{i}" for i in range(links)],
+        id=hvdc_ids,
         converter_station1_id=[f"SYN_VSC_{i}_1" for i in range(links)],
         converter_station2_id=[f"SYN_VSC_{i}_2" for i in range(links)],
         r=[1.0] * links, nominal_v=[DEFAULT_HVDC_NOMINAL_V] * links,
         max_p=[max_p] * links, target_p=[0.0] * links,
         converters_mode=["SIDE_1_RECTIFIER_SIDE_2_INVERTER"] * links)
+    # Angle-droop active-power control (disabled -> neutral) and the operator
+    # active-power range, both mirroring how real HVDC links are described.
+    network.create_extensions(
+        "hvdcAngleDroopActivePowerControl", id=hvdc_ids,
+        droop=[180.0] * links, p0=[0.0] * links, enabled=[False] * links)
+    network.create_extensions(
+        "hvdcOperatorActivePowerRange", id=hvdc_ids,
+        opr_from_cs1_to_cs2=[max_p] * links, opr_from_cs2_to_cs1=[max_p] * links)
     return {"hvdc_lines": links, "vsc_stations": len(vsc_ids)}
 
 
