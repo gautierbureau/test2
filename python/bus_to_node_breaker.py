@@ -135,9 +135,10 @@ def convert(source: pn.Network, busbar_sections_per_bus: int = 1,
     # Tap changers, once every terminal exists.
     _copy_ratio_tap_changers(source, target)
     _copy_phase_tap_changers(source, target)
-    # Operational limits and extensions, once every element exists.
+    # Operational limits, extensions and properties, once every element exists.
     _copy_operational_limits(source, target)
     _copy_extensions(source, target)
+    _copy_properties(source, target)
 
     return target
 
@@ -670,6 +671,26 @@ def _copy_extensions(source: pn.Network, target: pn.Network) -> None:
             target.create_extensions(name, df)
         except Exception:  # noqa: BLE001 - element absent or schema mismatch
             continue
+
+
+def _copy_properties(source: pn.Network, target: pn.Network) -> None:
+    """Copy element key/value properties onto the rebuilt network.
+
+    Properties are stored per identifiable; the rebuild keeps every id except
+    the (recomputed) buses, so properties are re-applied to whatever elements
+    still exist. ``get_elements_properties`` returns a long (id, key, value)
+    frame; ``add_elements_properties`` wants one call per key.
+    """
+    props = source.get_elements_properties()
+    if props.empty:
+        return
+    existing = set(target.get_elements(pn.ElementType.IDENTIFIABLE).index)
+    for key, group in props.groupby("key"):
+        sub = group[group.index.isin(existing)]
+        if sub.empty:
+            continue
+        target.add_elements_properties(
+            id=list(sub.index), **{key: [str(v) for v in sub["value"]]})
 
 
 # ---------------------------------------------------------------------------
