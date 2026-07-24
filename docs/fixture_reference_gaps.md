@@ -48,7 +48,7 @@ don't · `—` = not registered in our pypowsybl (unreachable) · blank = zero i
 | HVDC_LINE | 6 | 11 | ok |
 | STATIC_VAR_COMPENSATOR | 7 | 12 | ok |
 | VSC_CONVERTER_STATION | 12 | 22 | ok |
-| PROPERTIES | 137,858 | 0 | GAP |
+| PROPERTIES | 137,858 | 25,062 | ok |
 | REACTIVE_CAPABILITY_CURVE_POINT | 13,937 | 0 | GAP |
 
 Zero in both (omitted from work): ALIAS, AREA, AREA_BOUNDARIES,
@@ -102,10 +102,10 @@ voltagePerReactivePowerControl.
 - [x] **`discreteMeasurements`** (ext, 2,753) — done:
   `complete_network.add_discrete_measurements` adds a tap-position measurement
   per ratio/phase tap changer.
-- [ ] **`PROPERTIES`** (137,858) — already carried across conversion for sources
-  that have them (ACTIVSg70k = 4,200); PEGASE's MATPOWER source has none. To
-  close for PEGASE, synthesize representative properties (e.g. a `zone`/`region`
-  tag per substation) in `complete_network.py`.
+- [x] **`PROPERTIES`** (137,858) — done: `complete_network.add_properties` tags
+  every substation with `region` + `country_code` and every voltage level with
+  `voltage_class` (PEGASE 25,062; ACTIVSg70k 178,639, incl. the 4,200 carried
+  from its PSS/E source).
 
 ### B. Needs equipment synthesis
 
