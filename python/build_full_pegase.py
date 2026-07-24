@@ -31,6 +31,7 @@ import pypowsybl.network as pn
 
 import add_current_limits as acl
 import add_equipment as eq
+import add_remote_voltage_control as rvc
 import bus_to_node_breaker as b2nb
 import complete_network as cn
 
@@ -126,6 +127,10 @@ def build_full(input_path: str, output_path: str,
         net = nb
         print(f"node-breaker            : {len(net.get_busbar_sections())} busbar "
               f"section(s), {len(net.get_switches())} switch(es)")
+
+        # Remote voltage control: deport some EHV generators behind a new GSU
+        # transformer (node-breaker, feeder bays) regulating the HV bus remotely.
+        print(f"remote voltage control  : {rvc.deport_generators(net)}")
 
     # Solve the finished network with a DC-based voltage init so the fixture is
     # saved in (and reported as) a converged state. A flat start does not

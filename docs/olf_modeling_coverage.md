@@ -26,7 +26,7 @@ small amount that stays inside the device's range.
 
 | # | outer loop / option (OLF param) | current state | light modification | convergence |
 |---|---|---|---|---|
-| 1 | **Remote** voltage control (`voltageRemoteControl`) | gens regulate own bus | point a few generators' regulated terminal at a nearby bus, target = that bus's solved V | trivial (target already met) |
+| 1 | **Remote** voltage control (`voltageRemoteControl`) | ✅ **done** — `add_remote_voltage_control.deport_generators` moves EHV generators onto a new LV bus behind a GSU transformer (node-breaker, feeder bays), regulating the HV bus remotely | done | converges (DC init) |
 | 2 | **Shared/coordinated** voltage control | one controller per bus | make 2+ generators regulate the *same* remote bus | trivial |
 | 3 | **Transformer** voltage control (`transformerVoltageControlMode`) | RTCs regulate to neutral base V (no tap moves) + LF option off | perturb a few RTC target V by ±1 step; run with `transformerVoltageControlOn` | small tap move, converges |
 | 4 | **Shunt** voltage control (`shuntVoltageControlMode`) | 8,754 shunts all fixed | switch one multi-section shunt to voltage regulation, target = bus solved V | trivial |
