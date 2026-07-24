@@ -147,6 +147,62 @@ def _sized_reactive(g, power_factor: float, threshold: float) -> Optional[float]
 
 
 # ---------------------------------------------------------------------------
+# Reactive capability curves
+# ---------------------------------------------------------------------------
+
+DEFAULT_CURVE_POINTS = 3
+DEFAULT_CURVE_MIN_Q_FRACTION = 0.2  # floor on the half-band as a share of rated_s
+
+
+def add_reactive_capability_curves(
+    network: pn.Network,
+    points: int = DEFAULT_CURVE_POINTS,
+    only_missing: bool = True,
+) -> dict:
+    """Give generators a reactive **capability curve** instead of a flat band.
+
+    Real machines have a P-dependent reactive range (the classic "D-curve"): the
+    reactive band is widest at low active power and narrows as ``P`` approaches
+    the machine rating. This replaces a generator's MIN_MAX band with a
+    piecewise curve sampled at ``points`` active-power values from 0 to ``maxP``,
+    with a half-band of ``sqrt(ratedS^2 - P^2)`` (the armature-current circle,
+    floored at ``DEFAULT_CURVE_MIN_Q_FRACTION * ratedS``).
+
+    The band never drops below the generator's existing MIN_MAX limits, so the
+    base case stays feasible. Needs ``rated_s`` (run :func:`add_rated_s` first);
+    generators without a usable rating or ``maxP`` are left as they are. With
+    ``only_missing`` generators that already use a CURVE are skipped.
+    """
+    if points < 2:
+        raise ValueError("points must be >= 2")
+    gens = network.get_generators(all_attributes=True)
+    if only_missing:
+        gens = gens[gens["reactive_limits_kind"] != "CURVE"]
+
+    ids, ps, min_qs, max_qs = [], [], [], []
+    set_count = 0
+    for gid, g in gens.iterrows():
+        s = g["rated_s"]
+        pmax = g["max_p"]
+        if not (math.isfinite(s) and s > 0 and math.isfinite(pmax) and pmax > 0):
+            continue
+        emax = g["max_q"] if math.isfinite(g["max_q"]) else 0.0
+        emin = g["min_q"] if math.isfinite(g["min_q"]) else 0.0
+        floor = DEFAULT_CURVE_MIN_Q_FRACTION * s
+        for k in range(points):
+            p = pmax * k / (points - 1)
+            arm = math.sqrt(max(s * s - p * p, floor * floor))
+            ids.append(gid)
+            ps.append(p)
+            max_qs.append(max(arm, emax))   # never narrower than the existing band
+            min_qs.append(min(-arm, emin))
+        set_count += 1
+    if ids:
+        network.create_curve_reactive_limits(id=ids, p=ps, min_q=min_qs, max_q=max_qs)
+    return {"generators": len(gens), "set": set_count}
+
+
+# ---------------------------------------------------------------------------
 # Ratio tap changers
 # ---------------------------------------------------------------------------
 

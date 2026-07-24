@@ -21,6 +21,7 @@ from complete_network import (
     add_properties,
     add_rated_s,
     add_ratio_tap_changers,
+    add_reactive_capability_curves,
     add_reactive_limits,
     add_short_circuit,
     set_generation_mix,
@@ -351,6 +352,28 @@ def test_properties_tag_substations_and_voltage_levels():
     assert "country" not in set(props["key"])
     # Idempotent under only_missing.
     assert add_properties(net) == {"substations": 0, "voltage_levels": 0}
+
+
+def test_reactive_capability_curves_replace_bands():
+    net = pn.create_ieee14()
+    add_rated_s(net)
+    stats = add_reactive_capability_curves(net, points=3)
+    assert stats["set"] == len(net.get_generators())
+    gens = net.get_generators(all_attributes=True)
+    assert (gens["reactive_limits_kind"] == "CURVE").all()
+
+    pts = net.get_reactive_capability_curve_points()
+    # 3 points per generator.
+    assert len(pts) == 3 * len(gens)
+    gid = gens.index[0]
+    gp = pts.loc[gid].sort_values("p")
+    # Band narrows (or stays) as P rises, and is symmetric-ish about zero.
+    assert gp["max_q"].iloc[-1] <= gp["max_q"].iloc[0] + 1e-6
+    assert (gp["max_q"] > 0).all() and (gp["min_q"] < 0).all()
+    # Idempotent under only_missing (all are CURVE now).
+    assert add_reactive_capability_curves(net)["set"] == 0
+    with pytest.raises(ValueError):
+        add_reactive_capability_curves(pn.create_ieee14(), points=1)
 
 
 def test_short_circuit_on_generators_and_voltage_levels():

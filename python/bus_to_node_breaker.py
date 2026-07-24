@@ -260,7 +260,7 @@ def _copy_generator_reactive_limits(source, target):
     if len(curve_ids):
         pts = source.get_reactive_capability_curve_points()
         pts = pts[pts.index.get_level_values(0).isin(curve_ids)].reset_index()
-        target.create_reactive_capability_curve_points(
+        target.create_curve_reactive_limits(
             id=list(pts["id"]), p=list(pts["p"]),
             min_q=list(pts["min_q"]), max_q=list(pts["max_q"]))
 
@@ -324,7 +324,7 @@ def _copy_reactive_limits(source, target, ids, getter_name):
     if len(curve_ids):
         pts = source.get_reactive_capability_curve_points()
         pts = pts[pts.index.get_level_values(0).isin(curve_ids)].reset_index()
-        target.create_reactive_capability_curve_points(
+        target.create_curve_reactive_limits(
             id=list(pts["id"]), p=list(pts["p"]),
             min_q=list(pts["min_q"]), max_q=list(pts["max_q"]))
 
