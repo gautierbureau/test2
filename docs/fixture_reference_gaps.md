@@ -44,12 +44,12 @@ don't · `—` = not registered in our pypowsybl (unreachable) · blank = zero i
 | TERMINAL | 52,495 | 72,983 | ok |
 | TWO_WINDINGS_TRANSFORMER | 2,649 | 5,729 | ok |
 | VOLTAGE_LEVEL | 6,854 | 8,354 | ok |
-| BATTERY | 27 | 0 | GAP |
-| HVDC_LINE | 6 | 0 | GAP |
+| BATTERY | 27 | 47 | ok |
+| HVDC_LINE | 6 | 11 | ok |
+| STATIC_VAR_COMPENSATOR | 7 | 12 | ok |
+| VSC_CONVERTER_STATION | 12 | 22 | ok |
 | PROPERTIES | 137,858 | 0 | GAP |
 | REACTIVE_CAPABILITY_CURVE_POINT | 13,937 | 0 | GAP |
-| STATIC_VAR_COMPENSATOR | 7 | 0 | GAP |
-| VSC_CONVERTER_STATION | 12 | 0 | GAP |
 
 Zero in both (omitted from work): ALIAS, AREA, AREA_BOUNDARIES,
 AREA_VOLTAGE_LEVELS, BOUNDARY_LINE, BOUNDARY_LINE_GENERATION, DC_BUS, DC_GROUND,
@@ -108,17 +108,19 @@ voltagePerReactivePowerControl.
 
 ### B. Needs equipment synthesis
 
+- [x] **`BATTERY`** (27), **`STATIC_VAR_COMPENSATOR`** (7), **`HVDC_LINE`** (6) +
+  **`VSC_CONVERTER_STATION`** (12) — done in `add_equipment.py`: sparse,
+  electrically-neutral synthetic devices injected before the load flow and
+  carried across the node-breaker conversion (PEGASE now 47/12/11/22,
+  ACTIVSg70k 235/61/52/104). Their HVDC/storage extensions
+  (`hvdcAngleDroopActivePowerControl`, `hvdcOperatorActivePowerRange`,
+  `standbyAutomaton`, `stateOfCharge`) are still not set.
 - [ ] **`REACTIVE_CAPABILITY_CURVE_POINT`** (13,937) — our generators use MIN_MAX
   bands; add an option in `complete_network.py` to lay down a piecewise reactive
   **capability curve** instead of a flat band.
 - [ ] **`generatorShortCircuit`** / **`identifiableShortCircuit`** (6,900 / 6,808)
   — synthesize short-circuit data (transient reactance / min-max short-circuit
   current) as a new completion.
-- [ ] **`BATTERY`** (27), **`STATIC_VAR_COMPENSATOR`** (7), **`HVDC_LINE`** (6) +
-  **`VSC_CONVERTER_STATION`** (12) and their extensions
-  (`hvdcAngleDroopActivePowerControl`, `hvdcOperatorActivePowerRange`,
-  `standbyAutomaton`, `stateOfCharge`) — device types absent from the source
-  cases; would require injecting synthetic equipment.
 - [ ] **`coordinatedReactiveControl`** (110) — set on a subset of generators in a
   coordinated voltage-control zone.
 
