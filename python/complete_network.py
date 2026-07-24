@@ -603,6 +603,64 @@ def add_properties(
 
 
 # ---------------------------------------------------------------------------
+# Short-circuit data
+# ---------------------------------------------------------------------------
+
+DEFAULT_TRANS_X_PU = 0.25       # transient reactance X'd (pu on machine base)
+DEFAULT_SUBTRANS_X_PU = 0.18    # subtransient reactance X''d (pu)
+# Representative max short-circuit current (A) by voltage class; min is a share.
+_IP_MAX_BY_CLASS = {"EHV": 40000.0, "HV": 31500.0, "MV": 25000.0, "LV": 10000.0}
+_IP_MIN_FRACTION = 0.3
+
+
+def add_short_circuit(network: pn.Network, only_missing: bool = True) -> dict:
+    """Add short-circuit data used by fault calculations.
+
+    - ``generatorShortCircuit`` on every generator: transient / subtransient
+      reactances in ohms, sized ``x_pu * Vn^2 / ratedS`` from the machine's
+      nominal voltage and rated apparent power (a step-up transformer reactance
+      of 0 is recorded).
+    - ``identifiableShortCircuit`` on every voltage level: representative min/max
+      short-circuit current (A) by voltage class.
+
+    A load flow cannot infer these, so representative per-unit reactances and
+    fault levels are used. Run :func:`add_rated_s` first for the best sizing.
+    """
+    nominal = network.get_voltage_levels()["nominal_v"]
+    stats = {"generators": 0, "voltage_levels": 0}
+
+    gens = network.get_generators(all_attributes=True)
+    skip = _elements_with_extension(network, "generatorShortCircuit") if only_missing else set()
+    gens = gens[~gens.index.isin(skip)]
+    if not gens.empty:
+        trans, subtrans = [], []
+        for _gid, g in gens.iterrows():
+            vn = float(nominal.get(g["voltage_level_id"], 0.0))
+            s = g["rated_s"]
+            if not (math.isfinite(s) and s > 0):
+                cap = _gen_capacity(g)
+                s = cap / DEFAULT_GENERATOR_POWER_FACTOR if cap > 0 else 0.0
+            base = (vn * vn / s) if (vn > 0 and s > 0) else 1.0
+            trans.append(DEFAULT_TRANS_X_PU * base)
+            subtrans.append(DEFAULT_SUBTRANS_X_PU * base)
+        network.create_extensions(
+            "generatorShortCircuit", id=list(gens.index),
+            direct_trans_x=trans, direct_sub_trans_x=subtrans,
+            step_up_transformer_x=[0.0] * len(gens))
+        stats["generators"] = len(gens)
+
+    skip_vl = _elements_with_extension(network, "identifiableShortCircuit") if only_missing else set()
+    vids = [v for v in network.get_voltage_levels().index if v not in skip_vl]
+    if vids:
+        ip_max = [_IP_MAX_BY_CLASS[_voltage_class(float(nominal[v]))] for v in vids]
+        network.create_extensions(
+            "identifiableShortCircuit", id=vids,
+            ip_min=[m * _IP_MIN_FRACTION for m in ip_max], ip_max=ip_max)
+        stats["voltage_levels"] = len(vids)
+    return stats
+
+
+# ---------------------------------------------------------------------------
 # Active power control (participation factors)
 # ---------------------------------------------------------------------------
 

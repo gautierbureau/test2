@@ -22,6 +22,7 @@ from complete_network import (
     add_rated_s,
     add_ratio_tap_changers,
     add_reactive_limits,
+    add_short_circuit,
     set_generation_mix,
 )
 from tests.test_bus_to_node_breaker import _extended_ieee14
@@ -350,6 +351,25 @@ def test_properties_tag_substations_and_voltage_levels():
     assert "country" not in set(props["key"])
     # Idempotent under only_missing.
     assert add_properties(net) == {"substations": 0, "voltage_levels": 0}
+
+
+def test_short_circuit_on_generators_and_voltage_levels():
+    net = pn.create_ieee14()
+    add_rated_s(net)
+    stats = add_short_circuit(net)
+    assert stats["generators"] == len(net.get_generators())
+    assert stats["voltage_levels"] == len(net.get_voltage_levels())
+
+    gsc = net.get_extensions("generatorShortCircuit")
+    # Reactances are positive ohms, subtransient below transient.
+    assert (gsc["direct_trans_x"] > 0).all()
+    assert (gsc["direct_sub_trans_x"] < gsc["direct_trans_x"]).all()
+
+    isc = net.get_extensions("identifiableShortCircuit")
+    assert set(isc["equipment_type"]) == {"VOLTAGE_LEVEL"}
+    assert (isc["ip_min"] < isc["ip_max"]).all()
+    # Idempotent under only_missing.
+    assert add_short_circuit(net) == {"generators": 0, "voltage_levels": 0}
 
 
 def test_measurements_reject_bad_std():

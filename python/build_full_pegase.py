@@ -68,6 +68,19 @@ def _reattach_discrete_measurements(src: pn.Network, dst: pn.Network) -> None:
         dst.create_extensions("discreteMeasurements", df)
 
 
+def _reattach_identifiable_short_circuit(src: pn.Network, dst: pn.Network) -> None:
+    """Copy identifiableShortCircuit across a rebuild.
+
+    Its dataframe carries a read-only ``equipment_type`` column that the create
+    call rejects, so the generic converter skips it; drop that column and
+    recreate here (the voltage levels keep their ids in the rebuild).
+    """
+    df = src.get_extensions("identifiableShortCircuit")
+    if not df.empty:
+        dst.create_extensions("identifiableShortCircuit",
+                              df[[c for c in df.columns if c != "equipment_type"]])
+
+
 def build_full(input_path: str, output_path: str,
                node_breaker: bool = True) -> pn.Network:
     """Apply every enhancement to the network at ``input_path`` and save it."""
@@ -86,6 +99,7 @@ def build_full(input_path: str, output_path: str,
         ("generation mix", lambda: cn.set_generation_mix(net)),
         ("rated_s", lambda: cn.add_rated_s(net, run_loadflow=False)),
         ("active power control", lambda: cn.add_active_power_control(net)),
+        ("short circuit", lambda: cn.add_short_circuit(net)),
         ("properties", lambda: cn.add_properties(net)),
         ("load detail", lambda: cn.add_load_detail(net)),
         ("measurements", lambda: cn.add_measurements(net, run_loadflow=False)),
@@ -106,6 +120,7 @@ def build_full(input_path: str, output_path: str,
         _reattach_measurements(net, nb)
         _reattach_observability(net, nb)
         _reattach_discrete_measurements(net, nb)
+        _reattach_identifiable_short_circuit(net, nb)
         net = nb
         print(f"node-breaker            : {len(net.get_busbar_sections())} busbar "
               f"section(s), {len(net.get_switches())} switch(es)")
