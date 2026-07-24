@@ -63,19 +63,19 @@ TIE_LINE, VOLTAGE_ANGLE_LIMITS, VOLTAGE_SOURCE_CONVERTER.
 |---|--:|--:|---|
 | activePowerControl | 6,900 | 4,092 | ok |
 | branchObservability | 10,892 | 20,467 | ok |
+| busbarSectionPosition | 14,073 | 13,659 | ok |
+| detail | 8,140 | 5,544 | ok |
+| discreteMeasurements | 2,753 | 5,729 | ok |
 | injectionObservability | 25,445 | 9,636 | ok |
 | measurements | 42,358 | 142,074 | ok |
 | position | 38,124 | 59,324 | ok |
-| busbarSectionPosition | 14,073 | 0 | GAP |
+| voltageRegulation | 27 | 47 | ok |
 | coordinatedReactiveControl | 110 | 0 | GAP |
-| detail | 8,140 | 0 | GAP |
-| discreteMeasurements | 2,753 | 0 | GAP |
 | generatorShortCircuit | 6,900 | 0 | GAP |
 | identifiableShortCircuit | 6,808 | 0 | GAP |
 | hvdcAngleDroopActivePowerControl | 6 | 0 | GAP |
 | hvdcOperatorActivePowerRange | 4 | 0 | GAP |
 | standbyAutomaton | 7 | 0 | GAP |
-| voltageRegulation | 27 | 0 | GAP |
 | congestionManagement | 27 | — | — |
 | currentLimitsPerSeason | 732,839 | — | — |
 | stateOfCharge | 20 | — | — |
@@ -92,19 +92,20 @@ voltagePerReactivePowerControl.
 
 ### A. Cheap wins — data we can derive/carry
 
-- [ ] **`busbarSectionPosition`** (ext, 14,073) — the node-breaker converter sets
-  feeder `position` but not busbar-section position. Add it in
-  `python/bus_to_node_breaker.py` when creating busbar sections.
+- [x] **`busbarSectionPosition`** (ext, 14,073) — done: the node-breaker
+  converter now tags every rebuilt busbar section (one busbar, sections 1..k per
+  voltage level).
+- [x] **`voltageRegulation`** (ext, 27) — done: attached (regulator off) to each
+  synthetic battery in `add_equipment.py`.
+- [x] **`detail`** (ext, 8,140) — done: `complete_network.add_load_detail` splits
+  each load's P/Q into a fixed (40 %) and variable (60 %) part.
+- [x] **`discreteMeasurements`** (ext, 2,753) — done:
+  `complete_network.add_discrete_measurements` adds a tap-position measurement
+  per ratio/phase tap changer.
 - [ ] **`PROPERTIES`** (137,858) — already carried across conversion for sources
   that have them (ACTIVSg70k = 4,200); PEGASE's MATPOWER source has none. To
   close for PEGASE, synthesize representative properties (e.g. a `zone`/`region`
   tag per substation) in `complete_network.py`.
-- [ ] **`voltageRegulation`** (ext, 27) — set the voltageRegulation extension on
-  the handful of regulating shunts/injections that carry a voltage setpoint.
-- [ ] **`detail`** (ext, 8,140) — load P/Q detail (fixed vs variable split); add
-  a completion in `complete_network.py` that tags each load.
-- [ ] **`discreteMeasurements`** (ext, 2,753) — discrete measurements on tap
-  changers / switches; extend `add_measurements` to also emit discrete ones.
 
 ### B. Needs equipment synthesis
 
