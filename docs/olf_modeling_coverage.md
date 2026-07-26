@@ -27,7 +27,7 @@ small amount that stays inside the device's range.
 | # | outer loop / option (OLF param) | current state | light modification | convergence |
 |---|---|---|---|---|
 | 1 | **Remote** voltage control (`voltageRemoteControl`) | ✅ **done** — `add_remote_voltage_control.deport_generators` moves EHV generators onto a new LV bus behind a GSU transformer (node-breaker, feeder bays), regulating the HV bus remotely | done | converges (DC init) |
-| 2 | **Shared/coordinated** voltage control | one controller per bus | make 2+ generators regulate the *same* remote bus | trivial |
+| 2 | **Shared/coordinated** voltage control | one controller per bus | ✅ **done** — `complete_network.add_shared_voltage_control` points the generators of a multi-unit voltage level at one common bus (50 groups), target = its solved voltage | done | converges |
 | 3 | **Transformer** voltage control (`transformerVoltageControlMode`) | ✅ **done** — `complete_network.add_transformer_voltage_control` keeps a converging subset (~300) of the ratio tap changers regulating (all 5 655 at once diverge) and verifies the outer loop converges | done | converges (subset) |
 | 4 | **Shunt** voltage control (`shuntVoltageControlMode`) | 8,754 shunts all fixed | switch one multi-section shunt to voltage regulation, target = bus solved V | trivial |
 | 5 | **Phase** control (`phaseShifterRegulationOn`) | ✅ **done** — `complete_network.add_phase_control` enables the 74 PTCs as CURRENT_LIMITER with a threshold above base-case flow (passive until overload, like real shifters) | done | converges with phase control on |

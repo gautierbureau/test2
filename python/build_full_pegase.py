@@ -153,6 +153,10 @@ def build_full(input_path: str, output_path: str,
         # changers regulating (thousands at once do not converge).
         print(f"transformer voltage ctl : {cn.add_transformer_voltage_control(net)}")
 
+        # Shared voltage control: several generators in a voltage level co-regulate
+        # one common bus.
+        print(f"shared voltage control  : {cn.add_shared_voltage_control(net)}")
+
     # Solve the finished network with a DC-based voltage init so the fixture is
     # saved in (and reported as) a converged state. A flat start does not
     # converge on the rebuilt node-breaker model at this size (many retained

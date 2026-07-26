@@ -24,11 +24,13 @@ from complete_network import (
     add_ratio_tap_changers,
     add_reactive_capability_curves,
     add_reactive_limits,
+    add_shared_voltage_control,
     add_short_circuit,
     add_svc_voltage_control,
     add_transformer_voltage_control,
     set_generation_mix,
 )
+from bus_to_node_breaker import convert
 from add_equipment import add_static_var_compensators
 from tests.test_bus_to_node_breaker import _extended_ieee14
 
@@ -398,6 +400,38 @@ def test_phase_control_enables_regulation_and_converges():
     assert res[0].status.name == "CONVERGED"
     # Idempotent: already-regulating shifters are not re-enabled.
     assert add_phase_control(net)["phase_shifters"] == 0
+
+
+def _two_gen_voltage_level():
+    """A voltage level with two generators on separate buses feeding a load."""
+    n = pn.create_empty("shared")
+    n.create_substations(id=["S1", "S2"])
+    n.create_voltage_levels(id=["VG", "VL"], substation_id=["S1", "S2"],
+                            topology_kind=["BUS_BREAKER", "BUS_BREAKER"],
+                            nominal_v=[225.0, 225.0])
+    n.create_buses(id=["A1", "A2"], voltage_level_id=["VG", "VG"])
+    n.create_buses(id=["LB"], voltage_level_id=["VL"])
+    n.create_generators(id=["GA"], voltage_level_id=["VG"], bus_id=["A1"], target_p=[60],
+                        min_p=[0], max_p=[200], target_v=[230], voltage_regulator_on=[True])
+    n.create_generators(id=["GB"], voltage_level_id=["VG"], bus_id=["A2"], target_p=[60],
+                        min_p=[0], max_p=[200], target_v=[230], voltage_regulator_on=[True])
+    n.create_loads(id=["LD"], voltage_level_id=["VL"], bus_id=["LB"], p0=[100], q0=[20])
+    n.create_lines(id=["L1"], voltage_level1_id=["VG"], bus1_id=["A1"],
+                   voltage_level2_id=["VL"], bus2_id=["LB"], r=[1], x=[10], g1=[0], b1=[0], g2=[0], b2=[0])
+    n.create_lines(id=["L2"], voltage_level1_id=["VG"], bus1_id=["A2"],
+                   voltage_level2_id=["VL"], bus2_id=["LB"], r=[1], x=[10], g1=[0], b1=[0], g2=[0], b2=[0])
+    return n
+
+
+def test_shared_voltage_control_groups_generators_on_one_bus():
+    net = convert(_two_gen_voltage_level())
+    lf.run_ac(net)
+    stats = add_shared_voltage_control(net)
+    assert stats["groups"] == 1 and stats["generators"] == 1
+    g = net.get_generators(all_attributes=True)
+    # Both generators now regulate the same bus.
+    assert g.at["GA", "regulated_bus_id"] == g.at["GB", "regulated_bus_id"]
+    assert lf.run_ac(net)[0].status.name == "CONVERGED"
 
 
 def test_transformer_voltage_control_keeps_converging_subset():

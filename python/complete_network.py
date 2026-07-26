@@ -388,6 +388,57 @@ def add_transformer_voltage_control(network: pn.Network,
 
 
 # ---------------------------------------------------------------------------
+# Shared (coordinated) generator voltage control
+# ---------------------------------------------------------------------------
+
+DEFAULT_SHARED_VC_GROUPS = 50
+
+
+def add_shared_voltage_control(network: pn.Network,
+                               count: int = DEFAULT_SHARED_VC_GROUPS) -> dict:
+    """Make several generators in a voltage level co-regulate one common bus.
+
+    Exercises OpenLoadFlow's shared (coordinated) voltage control, where more
+    than one generator controls the same bus and the reactive output is split
+    between them. In a multi-unit voltage level every generator is pointed at the
+    first generator's bus (a common busbar), all with that bus's already-solved
+    voltage as target, so the control is satisfied and the flow still converges.
+    Only ``count`` groups are set up (one activated control is enough; forcing
+    all of them is unnecessary). Run on the node-breaker network after a load flow.
+    """
+    buses = network.get_buses()
+    bbs = network.get_busbar_sections(all_attributes=True)
+    gens = network.get_generators(all_attributes=True)
+    gens = gens[gens["voltage_regulator_on"]]
+    by_vl = {}
+    for gid in gens.index:
+        by_vl.setdefault(gens.at[gid, "voltage_level_id"], []).append(gid)
+    groups = sorted((grp for grp in by_vl.values() if len(grp) >= 2), key=lambda x: x[0])
+
+    applied, secondaries = 0, 0
+    for grp in groups:
+        if applied >= count:
+            break
+        pilot = grp[0]
+        pbus = gens.at[pilot, "bus_id"]
+        cand = bbs[bbs["bus_id"] == pbus]
+        if pbus not in buses.index or cand.empty:
+            continue
+        v = buses.at[pbus, "v_mag"]
+        if not (math.isfinite(v) and v > 0):
+            continue
+        pbbs = cand.index[0]
+        secondary = grp[1:]
+        network.update_generators(
+            id=secondary, regulated_element_id=[pbbs] * len(secondary),
+            target_v=[float(v)] * len(secondary))
+        network.update_generators(id=[pilot], target_v=[float(v)])
+        applied += 1
+        secondaries += len(secondary)
+    return {"groups": applied, "generators": secondaries}
+
+
+# ---------------------------------------------------------------------------
 # Static var compensator voltage control
 # ---------------------------------------------------------------------------
 
