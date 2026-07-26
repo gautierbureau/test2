@@ -30,7 +30,7 @@ small amount that stays inside the device's range.
 | 2 | **Shared/coordinated** voltage control | one controller per bus | make 2+ generators regulate the *same* remote bus | trivial |
 | 3 | **Transformer** voltage control (`transformerVoltageControlMode`) | RTCs regulate to neutral base V (no tap moves) + LF option off | perturb a few RTC target V by ±1 step; run with `transformerVoltageControlOn` | small tap move, converges |
 | 4 | **Shunt** voltage control (`shuntVoltageControlMode`) | 8,754 shunts all fixed | switch one multi-section shunt to voltage regulation, target = bus solved V | trivial |
-| 5 | **Phase** control (`phaseShifterRegulationOn`) | 74 PTCs present, regulating off | enable one PTC in ACTIVE_POWER_CONTROL / CURRENT_LIMITER, target = current flow | trivial |
+| 5 | **Phase** control (`phaseShifterRegulationOn`) | ✅ **done** — `complete_network.add_phase_control` enables the 74 PTCs as CURRENT_LIMITER with a threshold above base-case flow (passive until overload, like real shifters) | done | converges with phase control on |
 | 6 | **Secondary** voltage control (`secondaryVoltageControl`) | extension absent | add a control zone: one pilot bus + a couple of controlling generators, target = pilot's solved V | trivial |
 | 7 | **SVC** voltage control + slope (`voltagePerReactivePowerControl`, `svcVoltageMonitoring`) | SVCs regulation off | enable one SVC in VOLTAGE mode with a small slope, target = bus solved V | trivial |
 | 8 | **SVC standby automaton** (`svcVoltageMonitoring`) | `standbyAutomaton` present, standby off | set one SVC to standby with thresholds around solved V | trivial |

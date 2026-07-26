@@ -112,6 +112,7 @@ def build_full(input_path: str, output_path: str,
     steps = [
         ("reactive limits", lambda: cn.add_reactive_limits(net, run_loadflow=False)),
         ("ratio tap changers", lambda: cn.add_ratio_tap_changers(net, run_loadflow=False)),
+        ("phase control", lambda: cn.add_phase_control(net)),
         ("generation mix", lambda: cn.set_generation_mix(net)),
         ("rated_s", lambda: cn.add_rated_s(net, run_loadflow=False)),
         ("reactive capability curves", lambda: cn.add_reactive_capability_curves(net)),

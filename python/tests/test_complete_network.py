@@ -18,6 +18,7 @@ from complete_network import (
     add_load_detail,
     add_measurements,
     add_observability,
+    add_phase_control,
     add_properties,
     add_rated_s,
     add_ratio_tap_changers,
@@ -374,6 +375,26 @@ def test_reactive_capability_curves_replace_bands():
     assert add_reactive_capability_curves(net)["set"] == 0
     with pytest.raises(ValueError):
         add_reactive_capability_curves(pn.create_ieee14(), points=1)
+
+
+def test_phase_control_enables_regulation_and_converges():
+    net = pn.create_four_substations_node_breaker_network()
+    lf.run_ac(net)
+    # Free the phase shifter's transformer of its competing ratio-tap regulation.
+    rtc = net.get_ratio_tap_changers(all_attributes=True)
+    if not rtc.empty:
+        net.update_ratio_tap_changers(id=list(rtc.index[rtc["regulating"]]),
+                                      regulating=[False] * int(rtc["regulating"].sum()))
+    stats = add_phase_control(net)
+    assert stats["phase_shifters"] >= 1
+    ptc = net.get_phase_tap_changers(all_attributes=True)
+    on = ptc[ptc["regulating"]]
+    assert set(on["regulation_mode"]) == {"CURRENT_LIMITER"}
+    # Converges with the phase-control outer loop enabled.
+    res = lf.run_ac(net, lf.Parameters(phase_shifter_regulation_on=True))
+    assert res[0].status.name == "CONVERGED"
+    # Idempotent: already-regulating shifters are not re-enabled.
+    assert add_phase_control(net)["phase_shifters"] == 0
 
 
 def test_short_circuit_on_generators_and_voltage_levels():

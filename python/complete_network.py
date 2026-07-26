@@ -287,6 +287,60 @@ def _side2_voltage(tx, buses) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
+# Phase control (phase-shifting transformers)
+# ---------------------------------------------------------------------------
+
+DEFAULT_PHASE_CURRENT_MARGIN = 1.5  # limiter threshold as a multiple of base flow
+
+
+def add_phase_control(network: pn.Network, count: Optional[int] = None,
+                      current_margin: float = DEFAULT_PHASE_CURRENT_MARGIN) -> dict:
+    """Turn idle phase-shifting transformers into current limiters.
+
+    Exercises OpenLoadFlow's phase-control outer loop (run with
+    ``phaseShifterRegulationOn``). Existing phase tap changers are enabled in
+    ``CURRENT_LIMITER`` mode with a threshold set above the current they already
+    carry (``current_margin`` x the base-case i1), which is how real phase
+    shifters behave - passive until an overload - so the outer loop is present
+    but does not trip and the flow still converges. Active-power-control mode was
+    tried but destabilised the flow when many shifters act at once. Run after a
+    load flow so the base-case currents are known.
+    """
+    ptc = network.get_phase_tap_changers(all_attributes=True)
+    ptc = ptc[~ptc["regulating"]]
+    if ptc.empty:
+        return {"phase_shifters": 0}
+    tx = network.get_2_windings_transformers(all_attributes=True)
+    # A transformer allows only one regulating control, so skip any whose ratio
+    # tap changer already regulates.
+    rtc = network.get_ratio_tap_changers(all_attributes=True)
+    rtc_regulating = set(rtc.index[rtc["regulating"]]) if not rtc.empty else set()
+
+    ids, values = [], []
+    for tid in ptc.index:
+        eid = tid[0] if isinstance(tid, tuple) else tid
+        if eid not in tx.index or eid in rtc_regulating:
+            continue
+        i1 = tx.at[eid, "i1"]
+        if not math.isfinite(i1):
+            continue
+        ids.append(eid)
+        values.append(max(float(i1) * current_margin, 100.0))
+        if count is not None and len(ids) >= count:
+            break
+    if not ids:
+        return {"phase_shifters": 0}
+    # Set the threshold before enabling regulation: the model rejects turning
+    # regulation on while the threshold is still unset.
+    network.update_phase_tap_changers(
+        id=ids, regulation_mode=["CURRENT_LIMITER"] * len(ids),
+        regulation_value=values, target_deadband=[10.0] * len(ids),
+        regulated_side=["ONE"] * len(ids))
+    network.update_phase_tap_changers(id=ids, regulating=[True] * len(ids))
+    return {"phase_shifters": len(ids)}
+
+
+# ---------------------------------------------------------------------------
 # Generation mix (energy sources)
 # ---------------------------------------------------------------------------
 
