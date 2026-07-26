@@ -25,8 +25,10 @@ from complete_network import (
     add_reactive_capability_curves,
     add_reactive_limits,
     add_short_circuit,
+    add_svc_voltage_control,
     set_generation_mix,
 )
+from add_equipment import add_static_var_compensators
 from tests.test_bus_to_node_breaker import _extended_ieee14
 
 
@@ -395,6 +397,24 @@ def test_phase_control_enables_regulation_and_converges():
     assert res[0].status.name == "CONVERGED"
     # Idempotent: already-regulating shifters are not re-enabled.
     assert add_phase_control(net)["phase_shifters"] == 0
+
+
+def test_svc_voltage_control_enables_and_converges():
+    net = pn.create_ieee14()
+    add_static_var_compensators(net, count=2)
+    lf.run_ac(net)
+    stats = add_svc_voltage_control(net)
+    assert stats["svcs"] == 2
+    svc = net.get_static_var_compensators(all_attributes=True)
+    on = svc[svc["regulating"]]
+    assert set(on["regulation_mode"]) == {"VOLTAGE"}
+    assert len(net.get_extensions("voltagePerReactivePowerControl")) == 2
+    # Converges both by default (svcVoltageMonitoring) and with the slope on.
+    assert lf.run_ac(net)[0].status.name == "CONVERGED"
+    assert lf.run_ac(net, lf.Parameters(
+        provider_parameters={"voltagePerReactivePowerControl": "true"}))[0].status.name == "CONVERGED"
+    # Idempotent: already-regulating SVCs are not touched again.
+    assert add_svc_voltage_control(net)["svcs"] == 0
 
 
 def test_short_circuit_on_generators_and_voltage_levels():

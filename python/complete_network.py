@@ -341,6 +341,43 @@ def add_phase_control(network: pn.Network, count: Optional[int] = None,
 
 
 # ---------------------------------------------------------------------------
+# Static var compensator voltage control
+# ---------------------------------------------------------------------------
+
+DEFAULT_SVC_SLOPE = 0.01  # kV per MVar (voltage droop of the SVC characteristic)
+
+
+def add_svc_voltage_control(network: pn.Network, slope: float = DEFAULT_SVC_SLOPE) -> dict:
+    """Put idle static var compensators into voltage regulation with a slope.
+
+    Exercises OpenLoadFlow's SVC voltage control (``svcVoltageMonitoring``, on by
+    default) and the voltage-droop characteristic (``voltagePerReactivePowerControl``
+    extension). Non-regulating SVCs are switched to ``VOLTAGE`` mode targeting the
+    voltage their bus already has in the solved base case, so the control is
+    satisfied from the start and the flow still converges. Run after a load flow.
+    """
+    svc = network.get_static_var_compensators(all_attributes=True)
+    svc = svc[~svc["regulating"]]
+    if svc.empty:
+        return {"svcs": 0}
+    buses = network.get_buses()
+    ids, target_v = [], []
+    for sid in svc.index:
+        b = svc.at[sid, "bus_id"]
+        if b in buses.index and math.isfinite(buses.at[b, "v_mag"]) and buses.at[b, "v_mag"] > 0:
+            ids.append(sid)
+            target_v.append(float(buses.at[b, "v_mag"]))
+    if not ids:
+        return {"svcs": 0}
+    network.update_static_var_compensators(
+        id=ids, regulation_mode=["VOLTAGE"] * len(ids),
+        target_v=target_v, regulating=[True] * len(ids))
+    network.create_extensions("voltagePerReactivePowerControl", id=ids,
+                              slope=[slope] * len(ids))
+    return {"svcs": len(ids)}
+
+
+# ---------------------------------------------------------------------------
 # Generation mix (energy sources)
 # ---------------------------------------------------------------------------
 

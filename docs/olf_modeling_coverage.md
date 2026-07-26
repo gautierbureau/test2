@@ -32,7 +32,7 @@ small amount that stays inside the device's range.
 | 4 | **Shunt** voltage control (`shuntVoltageControlMode`) | 8,754 shunts all fixed | switch one multi-section shunt to voltage regulation, target = bus solved V | trivial |
 | 5 | **Phase** control (`phaseShifterRegulationOn`) | ✅ **done** — `complete_network.add_phase_control` enables the 74 PTCs as CURRENT_LIMITER with a threshold above base-case flow (passive until overload, like real shifters) | done | converges with phase control on |
 | 6 | **Secondary** voltage control (`secondaryVoltageControl`) | extension absent | add a control zone: one pilot bus + a couple of controlling generators, target = pilot's solved V | trivial |
-| 7 | **SVC** voltage control + slope (`voltagePerReactivePowerControl`, `svcVoltageMonitoring`) | SVCs regulation off | enable one SVC in VOLTAGE mode with a small slope, target = bus solved V | trivial |
+| 7 | **SVC** voltage control + slope (`voltagePerReactivePowerControl`, `svcVoltageMonitoring`) | ✅ **done** — `complete_network.add_svc_voltage_control` puts the SVCs in VOLTAGE mode (target = bus solved V) with a voltage-droop slope | done | converges |
 | 8 | **SVC standby automaton** (`svcVoltageMonitoring`) | `standbyAutomaton` present, standby off | set one SVC to standby with thresholds around solved V | trivial |
 | 9 | **Generator remote reactive-power control** (`generatorReactivePowerRemoteControl`) | extension absent | add `RemoteReactivePowerControl` on a generator, target Q = current branch Q | trivial |
 | 10 | **Transformer reactive-power control** (`transformerReactivePowerControl`) | absent | set one RTC to reactive-power regulation, target = current Q | trivial |
