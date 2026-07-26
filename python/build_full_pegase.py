@@ -83,10 +83,24 @@ def _reattach_identifiable_short_circuit(src: pn.Network, dst: pn.Network) -> No
                               df[[c for c in df.columns if c != "equipment_type"]])
 
 
+def _load_case(input_path: str) -> pn.Network:
+    """Load a case, keeping real base voltages for MATPOWER inputs.
+
+    The MATPOWER importer flattens bus base voltages to 1.0 kV by default;
+    ``matpower.import.ignore-base-voltage=false`` keeps the real nominal kV, which
+    everything voltage-dependent (voltage class, short-circuit levels, remote-VC
+    eligibility) relies on. Applied automatically for ``.mat``/``.m`` inputs.
+    """
+    if input_path.lower().endswith((".mat", ".m")):
+        return pn.load(input_path,
+                       parameters={"matpower.import.ignore-base-voltage": "false"})
+    return pn.load(input_path)
+
+
 def build_full(input_path: str, output_path: str,
                node_breaker: bool = True) -> pn.Network:
     """Apply every enhancement to the network at ``input_path`` and save it."""
-    net = pn.load(input_path)
+    net = _load_case(input_path)
 
     # Inject synthetic equipment the source cases lack (batteries, SVCs, HVDC
     # links) before the load flow; they are created electrically neutral, so the
@@ -154,7 +168,8 @@ def build_full(input_path: str, output_path: str,
 def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-i", "--input", required=True,
-                        help="input case (e.g. case13659pegase.xiidm or .mat)")
+                        help="input case; a .mat/.m MATPOWER case is imported with "
+                             "real base voltages automatically (e.g. case13659pegase.mat)")
     parser.add_argument("-o", "--output", default="pegase13659_full.xiidm.gz",
                         help="output network; a .gz suffix writes it compressed "
                              "(default: %(default)s)")
