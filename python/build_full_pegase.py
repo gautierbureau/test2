@@ -160,6 +160,9 @@ def build_full(input_path: str, output_path: str,
         # Shunt voltage control: a few switchable shunts regulating voltage.
         print(f"shunt voltage control   : {cn.add_shunt_voltage_control(net)}")
 
+        # HVDC AC emulation: angle-droop active power control on the HVDC links.
+        print(f"hvdc ac emulation       : {cn.add_hvdc_ac_emulation(net)}")
+
     # Solve the finished network with a DC-based voltage init so the fixture is
     # saved in (and reported as) a converged state. A flat start does not
     # converge on the rebuilt node-breaker model at this size (many retained

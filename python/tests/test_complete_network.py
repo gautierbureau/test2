@@ -15,6 +15,7 @@ import pytest
 from complete_network import (
     add_active_power_control,
     add_discrete_measurements,
+    add_hvdc_ac_emulation,
     add_load_detail,
     add_measurements,
     add_observability,
@@ -31,8 +32,8 @@ from complete_network import (
     add_transformer_voltage_control,
     set_generation_mix,
 )
+from add_equipment import add_hvdc_links, add_static_var_compensators
 from bus_to_node_breaker import convert
-from add_equipment import add_static_var_compensators
 from tests.test_bus_to_node_breaker import _extended_ieee14
 
 
@@ -432,6 +433,18 @@ def test_shared_voltage_control_groups_generators_on_one_bus():
     g = net.get_generators(all_attributes=True)
     # Both generators now regulate the same bus.
     assert g.at["GA", "regulated_bus_id"] == g.at["GB", "regulated_bus_id"]
+    assert lf.run_ac(net)[0].status.name == "CONVERGED"
+
+
+def test_hvdc_ac_emulation_enables_and_converges():
+    net = pn.create_ieee14()
+    add_hvdc_links(net, count=1)   # HVDC link + angle-droop extension (disabled)
+    net = convert(net)
+    lf.run_ac(net)
+    stats = add_hvdc_ac_emulation(net)
+    assert stats["hvdc"] == 1
+    ext = net.get_extensions("hvdcAngleDroopActivePowerControl")
+    assert bool(ext["enabled"].all())
     assert lf.run_ac(net)[0].status.name == "CONVERGED"
 
 

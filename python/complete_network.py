@@ -388,6 +388,52 @@ def add_transformer_voltage_control(network: pn.Network,
 
 
 # ---------------------------------------------------------------------------
+# HVDC AC emulation (angle droop)
+# ---------------------------------------------------------------------------
+
+DEFAULT_HVDC_DROOP = 20.0  # MW per degree of AC angle difference
+
+
+def add_hvdc_ac_emulation(network: pn.Network, droop: float = DEFAULT_HVDC_DROOP,
+                          count: Optional[int] = None) -> dict:
+    """Switch HVDC links to AC emulation (angle-droop active power control).
+
+    Under AC emulation the DC active power follows ``p0 + droop * (theta1 -
+    theta2)`` of the AC buses at the two converter stations, exercising
+    OpenLoadFlow's HVDC AC-emulation outer loop. The endpoints are far apart, so
+    ``p0`` is set to cancel the droop term at the already-solved angle difference
+    (the link keeps its current, ~zero, transfer) and the flow still converges.
+    Run on the node-breaker network after a load flow.
+    """
+    hv = network.get_hvdc_lines(all_attributes=True)
+    if hv.empty:
+        return {"hvdc": 0}
+    vsc = network.get_vsc_converter_stations(all_attributes=True)
+    buses = network.get_buses()
+    ids, droops, p0s = [], [], []
+    for h in hv.index:
+        c1, c2 = hv.at[h, "converter_station1_id"], hv.at[h, "converter_station2_id"]
+        if c1 not in vsc.index or c2 not in vsc.index:
+            continue
+        b1, b2 = vsc.at[c1, "bus_id"], vsc.at[c2, "bus_id"]
+        if b1 not in buses.index or b2 not in buses.index:
+            continue
+        th1, th2 = buses.at[b1, "v_angle"], buses.at[b2, "v_angle"]
+        if not (math.isfinite(th1) and math.isfinite(th2)):
+            continue
+        ids.append(h)
+        droops.append(droop)
+        p0s.append(-droop * float(th1 - th2))  # cancel droop term at solved angles
+        if count is not None and len(ids) >= count:
+            break
+    if not ids:
+        return {"hvdc": 0}
+    network.create_extensions("hvdcAngleDroopActivePowerControl",
+                              id=ids, droop=droops, p0=p0s, enabled=[True] * len(ids))
+    return {"hvdc": len(ids)}
+
+
+# ---------------------------------------------------------------------------
 # Shunt voltage control (switchable shunts)
 # ---------------------------------------------------------------------------
 

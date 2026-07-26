@@ -37,7 +37,7 @@ small amount that stays inside the device's range.
 | 9 | **Generator remote reactive-power control** (`generatorReactivePowerRemoteControl`) | extension absent | add `RemoteReactivePowerControl` on a generator, target Q = current branch Q | trivial |
 | 10 | **Transformer reactive-power control** (`transformerReactivePowerControl`) | absent | set one RTC to reactive-power regulation, target = current Q | trivial |
 | 11 | **Area interchange control** (`areaInterchangeControl`) | 0 areas | create a few Areas with interchange target = current net position | trivial (target met) |
-| 12 | **HVDC AC emulation** (angle droop) | `hvdcAngleDroopActivePowerControl` present, `enabled=false` | enable it on one link, p0 = 0 | trivial |
+| 12 | **HVDC AC emulation** (angle droop) | ✅ **done** — `complete_network.add_hvdc_ac_emulation` enables angle-droop control on the HVDC links, with p0 cancelling the droop term at the solved angle difference | done | converges |
 | 13 | **Automation systems** (`simulateAutomationSystems`) | none | add one `OverloadManagementSystem` on a substation with a high threshold (never trips) | trivial (inactive) |
 
 ## Notes
