@@ -341,6 +341,53 @@ def add_phase_control(network: pn.Network, count: Optional[int] = None,
 
 
 # ---------------------------------------------------------------------------
+# Transformer voltage control
+# ---------------------------------------------------------------------------
+
+DEFAULT_TVC_COUNT = 300      # regulating ratio tap changers to keep active
+DEFAULT_TVC_DEADBAND = 2.0   # kV deadband, wide enough to avoid tap hunting
+
+
+def _tvc_converges(network: pn.Network) -> bool:
+    params = lf.Parameters(distributed_slack=True, use_reactive_limits=True,
+                           voltage_init_mode=lf.VoltageInitMode.DC_VALUES,
+                           transformer_voltage_control_on=True)
+    return lf.run_ac(network, params)[0].status.name == "CONVERGED"
+
+
+def add_transformer_voltage_control(network: pn.Network,
+                                    count: int = DEFAULT_TVC_COUNT,
+                                    deadband: float = DEFAULT_TVC_DEADBAND) -> dict:
+    """Keep a converging subset of ratio tap changers regulating voltage.
+
+    ``add_ratio_tap_changers`` makes every added tap changer voltage-regulating;
+    with the transformer-voltage-control outer loop on, thousands of them acting
+    at once do not converge. This trims the regulating set to an evenly spread
+    subset (widening its deadband) and verifies the outer loop converges,
+    halving the count until it does. The disabled tap changers keep their
+    structure (they are transparent with the outer loop off). Run on the final
+    (node-breaker) network, after a load flow.
+    """
+    rtc = network.get_ratio_tap_changers(all_attributes=True)
+    regulating = list(rtc.index[rtc["regulating"]])
+    if not regulating:
+        return {"regulating": 0, "disabled": 0}
+    network.update_ratio_tap_changers(
+        id=regulating, regulating=[False] * len(regulating))
+
+    n = min(count, len(regulating))
+    while n >= 1:
+        subset = [regulating[(i * len(regulating)) // n] for i in range(n)]
+        network.update_ratio_tap_changers(
+            id=subset, regulating=[True] * n, target_deadband=[deadband] * n)
+        if _tvc_converges(network):
+            return {"regulating": n, "disabled": len(regulating) - n}
+        network.update_ratio_tap_changers(id=subset, regulating=[False] * n)
+        n //= 2
+    return {"regulating": 0, "disabled": len(regulating)}
+
+
+# ---------------------------------------------------------------------------
 # Static var compensator voltage control
 # ---------------------------------------------------------------------------
 

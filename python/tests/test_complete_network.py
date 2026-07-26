@@ -26,6 +26,7 @@ from complete_network import (
     add_reactive_limits,
     add_short_circuit,
     add_svc_voltage_control,
+    add_transformer_voltage_control,
     set_generation_mix,
 )
 from add_equipment import add_static_var_compensators
@@ -397,6 +398,21 @@ def test_phase_control_enables_regulation_and_converges():
     assert res[0].status.name == "CONVERGED"
     # Idempotent: already-regulating shifters are not re-enabled.
     assert add_phase_control(net)["phase_shifters"] == 0
+
+
+def test_transformer_voltage_control_keeps_converging_subset():
+    net = pn.create_ieee14()
+    add_ratio_tap_changers(net)  # makes all transformers voltage-regulating
+    n_reg = int(net.get_ratio_tap_changers(all_attributes=True)["regulating"].sum())
+    assert n_reg > 0
+    lf.run_ac(net)
+    stats = add_transformer_voltage_control(net, count=n_reg)
+    assert stats["regulating"] >= 1
+    # The kept set converges with the transformer-voltage-control loop on.
+    res = lf.run_ac(net, lf.Parameters(transformer_voltage_control_on=True))
+    assert res[0].status.name == "CONVERGED"
+    rtc = net.get_ratio_tap_changers(all_attributes=True)
+    assert int(rtc["regulating"].sum()) == stats["regulating"]
 
 
 def test_svc_voltage_control_enables_and_converges():

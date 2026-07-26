@@ -149,6 +149,10 @@ def build_full(input_path: str, output_path: str,
         net, rvc_stats = rvc.deport_generators(net)
         print(f"remote voltage control  : {rvc_stats}")
 
+        # Transformer voltage control: keep a converging subset of the ratio tap
+        # changers regulating (thousands at once do not converge).
+        print(f"transformer voltage ctl : {cn.add_transformer_voltage_control(net)}")
+
     # Solve the finished network with a DC-based voltage init so the fixture is
     # saved in (and reported as) a converged state. A flat start does not
     # converge on the rebuilt node-breaker model at this size (many retained
