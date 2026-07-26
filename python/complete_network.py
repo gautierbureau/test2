@@ -388,6 +388,60 @@ def add_transformer_voltage_control(network: pn.Network,
 
 
 # ---------------------------------------------------------------------------
+# Shunt voltage control (switchable shunts)
+# ---------------------------------------------------------------------------
+
+DEFAULT_SHUNT_VC_COUNT = 20
+DEFAULT_SHUNT_SECTIONS = 4
+DEFAULT_SHUNT_B_PER_SECTION = 0.001  # S per section (small, ~a few MVar at EHV)
+
+
+def add_shunt_voltage_control(network: pn.Network, count: int = DEFAULT_SHUNT_VC_COUNT,
+                              sections: int = DEFAULT_SHUNT_SECTIONS,
+                              b_per_section: float = DEFAULT_SHUNT_B_PER_SECTION,
+                              deadband: float = 1.0) -> dict:
+    """Add switchable shunts that regulate voltage (shunt voltage control).
+
+    The source cases only carry single-section fixed shunts, which cannot control
+    voltage, so this creates a few multi-section switchable shunts (node-breaker
+    feeder bays) and puts them in voltage regulation targeting their bus's
+    already-solved voltage. Exercises OpenLoadFlow's shunt voltage control
+    (``shuntCompensatorVoltageControlOn``) while still converging. Run on the
+    node-breaker network after a load flow.
+    """
+    buses = network.get_buses()
+    bbs = network.get_busbar_sections(all_attributes=True)
+    cand = [b for b in sorted(bbs.index)
+            if bbs.at[b, "bus_id"] in buses.index
+            and math.isfinite(buses.at[bbs.at[b, "bus_id"], "v_mag"])
+            and buses.at[bbs.at[b, "bus_id"], "v_mag"] > 0]
+    if not cand:
+        return {"shunts": 0}
+    n = min(count, len(cand))
+    sel = [cand[(i * len(cand)) // n] for i in range(n)]
+    ids = [f"SYN_SHVC_{i}" for i in range(n)]
+
+    shunt_df = pd.DataFrame([{
+        "id": ids[i], "model_type": "LINEAR", "section_count": 1,
+        "bus_or_busbar_section_id": sel[i], "position_order": 9000 + i,
+        "target_v": 0.0, "target_deadband": deadband,
+    } for i in range(n)]).set_index("id")
+    linear_df = pd.DataFrame([{
+        "id": ids[i], "g_per_section": 0.0, "b_per_section": b_per_section,
+        "max_section_count": sections,
+    } for i in range(n)]).set_index("id")
+    pn.create_shunt_compensator_bay(network, shunt_df, linear_model_df=linear_df)
+
+    sh = network.get_shunt_compensators(all_attributes=True)
+    target_v = [float(buses.at[sh.at[i, "bus_id"], "v_mag"]) for i in ids]
+    # Set the setpoint before enabling regulation (the model rejects a NaN setpoint).
+    network.update_shunt_compensators(id=ids, target_v=target_v,
+                                      target_deadband=[deadband] * n)
+    network.update_shunt_compensators(id=ids, voltage_regulation_on=[True] * n)
+    return {"shunts": n}
+
+
+# ---------------------------------------------------------------------------
 # Shared (coordinated) generator voltage control
 # ---------------------------------------------------------------------------
 

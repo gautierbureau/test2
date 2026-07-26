@@ -26,6 +26,7 @@ from complete_network import (
     add_reactive_limits,
     add_shared_voltage_control,
     add_short_circuit,
+    add_shunt_voltage_control,
     add_svc_voltage_control,
     add_transformer_voltage_control,
     set_generation_mix,
@@ -432,6 +433,19 @@ def test_shared_voltage_control_groups_generators_on_one_bus():
     # Both generators now regulate the same bus.
     assert g.at["GA", "regulated_bus_id"] == g.at["GB", "regulated_bus_id"]
     assert lf.run_ac(net)[0].status.name == "CONVERGED"
+
+
+def test_shunt_voltage_control_adds_switchable_regulating_shunts():
+    net = convert(pn.create_ieee14())
+    lf.run_ac(net)
+    stats = add_shunt_voltage_control(net, count=2)
+    assert stats["shunts"] == 2
+    sh = net.get_shunt_compensators(all_attributes=True)
+    added = sh[sh.index.str.startswith("SYN_SHVC_")]
+    assert (added["max_section_count"] > 1).all()          # switchable
+    assert bool(added["voltage_regulation_on"].all())      # regulating
+    assert lf.run_ac(net, lf.Parameters(
+        shunt_compensator_voltage_control_on=True))[0].status.name == "CONVERGED"
 
 
 def test_transformer_voltage_control_keeps_converging_subset():

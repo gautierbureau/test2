@@ -157,6 +157,9 @@ def build_full(input_path: str, output_path: str,
         # one common bus.
         print(f"shared voltage control  : {cn.add_shared_voltage_control(net)}")
 
+        # Shunt voltage control: a few switchable shunts regulating voltage.
+        print(f"shunt voltage control   : {cn.add_shunt_voltage_control(net)}")
+
     # Solve the finished network with a DC-based voltage init so the fixture is
     # saved in (and reported as) a converged state. A flat start does not
     # converge on the rebuilt node-breaker model at this size (many retained
