@@ -556,20 +556,23 @@ def _copy_ratio_tap_changers(source, target):
 
 
 def _copy_phase_tap_changers(source, target):
-    ptc = source.get_phase_tap_changers()
+    ptc = source.get_phase_tap_changers(all_attributes=True)
     if ptc.empty:
         return
     txs = source.get_2_windings_transformers(all_attributes=True)
     ptc = ptc[(ptc["side"] == "") & ptc.index.isin(txs.index)]
     if ptc.empty:
         return
+    # Create every phase tap changer non-regulating first (with its threshold
+    # already set), then switch regulation on where the source had it: the model
+    # rejects a regulating changer whose setpoint is not yet in place.
     ptc_df = pd.DataFrame({
         "id": list(ptc.index),
         "tap": list(ptc["tap"]),
         "low_tap": list(ptc["low_tap"]),
         "regulation_mode": list(ptc["regulation_mode"]),
         "target_deadband": [d if pd.notna(d) else 0.0 for d in ptc["target_deadband"]],
-        "regulating": list(ptc["regulating"]),
+        "regulating": [False] * len(ptc),
         "regulated_side": [_regulated_side(t, b, txs)
                            for t, b in zip(ptc.index, ptc["regulating_bus_id"])],
     }).set_index("id")
@@ -577,6 +580,13 @@ def _copy_phase_tap_changers(source, target):
     steps = steps[steps["id"].isin(ptc.index)]
     steps_df = steps[["id", "rho", "alpha", "r", "x", "g", "b"]].set_index("id")
     target.create_phase_tap_changers(ptc_df, steps_df)
+    # create_phase_tap_changers takes no regulation_value, so apply the setpoint
+    # then switch regulation on for the changers that had it in the source.
+    reg_ids = [t for t in ptc.index if bool(ptc.at[t, "regulating"])]
+    if reg_ids:
+        target.update_phase_tap_changers(
+            id=reg_ids, regulation_value=[float(ptc.at[t, "regulation_value"]) for t in reg_ids])
+        target.update_phase_tap_changers(id=reg_ids, regulating=[True] * len(reg_ids))
 
 
 # ---------------------------------------------------------------------------

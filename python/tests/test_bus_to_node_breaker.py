@@ -7,6 +7,7 @@ and stays electrically transparent under an AC load flow.
 """
 
 import pandas as pd
+import pypowsybl.loadflow as lf
 import pypowsybl.network as pn
 import pytest
 
@@ -254,6 +255,44 @@ def test_busbar_sections_get_position_extension():
     net2.add_elements_properties(id=["B1-G"], zone=["north"])
     tgt2 = convert(net2)
     assert tgt2.get_elements_properties().loc["B1-G", "value"] == "north"
+
+
+def test_regulating_phase_tap_changer_survives_conversion():
+    # A phase shifter parallel to a line, enabled as a current limiter, must be
+    # rebuilt as a *regulating* phase tap changer (the converter used to create
+    # it without its setpoint and crash).
+    import complete_network as cn
+    n = pn.create_empty("pst")
+    n.create_substations(id=["S1"])
+    n.create_voltage_levels(id=["V1", "V2"], substation_id=["S1", "S1"],
+                            topology_kind=["BUS_BREAKER", "BUS_BREAKER"],
+                            nominal_v=[225.0, 225.0])
+    n.create_buses(id=["B1", "B2"], voltage_level_id=["V1", "V2"])
+    n.create_generators(id=["G"], voltage_level_id=["V1"], bus_id=["B1"],
+                        target_p=[100], min_p=[0], max_p=[300], target_v=[230],
+                        voltage_regulator_on=[True])
+    n.create_loads(id=["L"], voltage_level_id=["V2"], bus_id=["B2"], p0=[100], q0=[20])
+    n.create_lines(id=["LINE"], voltage_level1_id=["V1"], bus1_id=["B1"],
+                   voltage_level2_id=["V2"], bus2_id=["B2"],
+                   r=[1.0], x=[10.0], g1=[0], b1=[0], g2=[0], b2=[0])
+    n.create_2_windings_transformers(id=["PST"], voltage_level1_id=["V1"], bus1_id=["B1"],
+                                     voltage_level2_id=["V2"], bus2_id=["B2"], r=[1.0],
+                                     x=[12.0], g=[0], b=[0], rated_u1=[225], rated_u2=[225])
+    steps = pd.DataFrame([{"id": "PST", "rho": 1.0, "alpha": a, "r": 0, "x": 0, "g": 0, "b": 0}
+                          for a in (-5.0, 0.0, 5.0)]).set_index("id")
+    n.create_phase_tap_changers(pd.DataFrame([{
+        "id": "PST", "low_tap": 0, "tap": 1, "regulation_mode": "CURRENT_LIMITER",
+        "target_deadband": 0.0, "regulating": False, "regulated_side": "ONE"}]).set_index("id"),
+        steps)
+    lf.run_ac(n)
+    assert cn.add_phase_control(n)["phase_shifters"] == 1
+
+    target = convert(n)
+    ptc = target.get_phase_tap_changers(all_attributes=True)
+    assert bool(ptc.at["PST", "regulating"])
+    assert ptc.at["PST", "regulation_mode"] == "CURRENT_LIMITER"
+    assert lf.run_ac(target, lf.Parameters(
+        phase_shifter_regulation_on=True))[0].status.name == "CONVERGED"
 
 
 def test_rejects_node_breaker_input():
