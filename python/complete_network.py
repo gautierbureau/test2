@@ -575,6 +575,59 @@ def add_svc_voltage_control(network: pn.Network, slope: float = DEFAULT_SVC_SLOP
     return {"svcs": len(ids)}
 
 
+def _svc_standby_converges(network: pn.Network) -> bool:
+    params = lf.Parameters(distributed_slack=True, use_reactive_limits=True,
+                           voltage_init_mode=lf.VoltageInitMode.DC_VALUES)
+    return lf.run_ac(network, params)[0].status.name == "CONVERGED"
+
+
+def add_svc_standby_automaton(network: pn.Network,
+                             count: Optional[int] = None) -> dict:
+    """Put a converging subset of SVCs into standby mode (standby automaton).
+
+    An SVC carrying the ``standbyAutomaton`` extension with ``standby`` on holds
+    a fixed susceptance ``b0`` while its regulated voltage stays inside
+    ``[low_voltage_threshold, high_voltage_threshold]`` and only switches to
+    voltage regulation (at the low/high setpoints) once the voltage leaves that
+    band - exercising OpenLoadFlow's standby-automaton handling
+    (``svcVoltageMonitoring``). The thresholds are recentred on the bus's
+    already-solved voltage (with ``b0`` = 0) so the automaton stays in its
+    neutral band and the flow still converges. Activates on all eligible SVCs,
+    halving the set until it converges. Run after a load flow, on SVCs already in
+    ``VOLTAGE`` mode (see ``add_svc_voltage_control``).
+    """
+    ext = network.get_extensions("standbyAutomaton")
+    if ext.empty:
+        return {"standby": 0}
+    svc = network.get_static_var_compensators(all_attributes=True)
+    buses = network.get_buses()
+    cand, vsolved = [], {}
+    for sid in ext.index:
+        if sid not in svc.index:
+            continue
+        b = svc.at[sid, "bus_id"]
+        if b in buses.index and math.isfinite(buses.at[b, "v_mag"]) and buses.at[b, "v_mag"] > 0:
+            cand.append(sid)
+            vsolved[sid] = float(buses.at[b, "v_mag"])
+    if not cand:
+        return {"standby": 0}
+
+    n = len(cand) if count is None else min(count, len(cand))
+    while n >= 1:
+        sel = [cand[(i * len(cand)) // n] for i in range(n)]
+        network.update_extensions(
+            "standbyAutomaton", id=sel, standby=[True] * n, b0=[0.0] * n,
+            low_voltage_threshold=[0.90 * vsolved[s] for s in sel],
+            low_voltage_setpoint=[0.95 * vsolved[s] for s in sel],
+            high_voltage_threshold=[1.10 * vsolved[s] for s in sel],
+            high_voltage_setpoint=[1.05 * vsolved[s] for s in sel])
+        if _svc_standby_converges(network):
+            return {"standby": n, "off": len(cand) - n}
+        network.update_extensions("standbyAutomaton", id=sel, standby=[False] * n)
+        n //= 2
+    return {"standby": 0, "off": len(cand)}
+
+
 # ---------------------------------------------------------------------------
 # Generation mix (energy sources)
 # ---------------------------------------------------------------------------

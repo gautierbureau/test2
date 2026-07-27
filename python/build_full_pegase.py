@@ -160,6 +160,10 @@ def build_full(input_path: str, output_path: str,
         # Shunt voltage control: a few switchable shunts regulating voltage.
         print(f"shunt voltage control   : {cn.add_shunt_voltage_control(net)}")
 
+        # SVC standby automaton: put a converging subset of SVCs into standby
+        # (fixed b0 until voltage leaves the band around its solved value).
+        print(f"svc standby automaton   : {cn.add_svc_standby_automaton(net)}")
+
         # HVDC AC emulation: angle-droop active power control on the HVDC links.
         print(f"hvdc ac emulation       : {cn.add_hvdc_ac_emulation(net)}")
 

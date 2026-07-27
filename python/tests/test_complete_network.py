@@ -28,6 +28,7 @@ from complete_network import (
     add_shared_voltage_control,
     add_short_circuit,
     add_shunt_voltage_control,
+    add_svc_standby_automaton,
     add_svc_voltage_control,
     add_transformer_voltage_control,
     set_generation_mix,
@@ -492,6 +493,31 @@ def test_svc_voltage_control_enables_and_converges():
         provider_parameters={"voltagePerReactivePowerControl": "true"}))[0].status.name == "CONVERGED"
     # Idempotent: already-regulating SVCs are not touched again.
     assert add_svc_voltage_control(net)["svcs"] == 0
+
+
+def test_svc_standby_automaton_enables_and_converges():
+    net = pn.create_ieee14()
+    add_static_var_compensators(net, count=2)
+    lf.run_ac(net)
+    add_svc_voltage_control(net)
+    stats = add_svc_standby_automaton(net)
+    assert stats["standby"] >= 1
+    ext = net.get_extensions("standbyAutomaton")
+    on = ext[ext["standby"]]
+    assert len(on) == stats["standby"]
+    # Standby b0 is neutral and the thresholds bracket the solved voltage.
+    assert set(on["b0"]) == {0.0}
+    svc = net.get_static_var_compensators(all_attributes=True)
+    buses = net.get_buses()
+    for sid in on.index:
+        v = buses.at[svc.at[sid, "bus_id"], "v_mag"]
+        assert on.at[sid, "low_voltage_threshold"] < v < on.at[sid, "high_voltage_threshold"]
+    assert lf.run_ac(net)[0].status.name == "CONVERGED"
+
+
+def test_svc_standby_automaton_no_svcs():
+    net = pn.create_ieee14()
+    assert add_svc_standby_automaton(net)["standby"] == 0
 
 
 def test_short_circuit_on_generators_and_voltage_levels():
