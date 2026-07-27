@@ -539,6 +539,114 @@ def add_shared_voltage_control(network: pn.Network,
 
 
 # ---------------------------------------------------------------------------
+# Secondary voltage control (control zones)
+# ---------------------------------------------------------------------------
+
+DEFAULT_SECONDARY_VC_ZONES = 2
+DEFAULT_SECONDARY_VC_UNITS = 2
+
+
+def _secondary_vc_converges(network: pn.Network) -> bool:
+    params = lf.Parameters(distributed_slack=True, use_reactive_limits=True,
+                           voltage_init_mode=lf.VoltageInitMode.DC_VALUES,
+                           provider_parameters={"secondaryVoltageControl": "true"})
+    return lf.run_ac(network, params)[0].status.name == "CONVERGED"
+
+
+def add_secondary_voltage_control(network: pn.Network,
+                                  zones: int = DEFAULT_SECONDARY_VC_ZONES,
+                                  units_per_zone: int = DEFAULT_SECONDARY_VC_UNITS) -> dict:
+    """Set up a few secondary-voltage-control zones (the ``secondaryVoltageControl``
+    extension).
+
+    Each zone has a pilot bus and a set of controlling generators; with the
+    ``secondaryVoltageControl`` outer loop on, OpenLoadFlow adjusts the units'
+    reactive output together to hold the pilot voltage. Zones are built from
+    voltage levels that already carry two or more locally regulating generators
+    (an electrically coherent group), falling back to any spare locally
+    regulating generators, and the pilot target is set to the pilot bus's
+    already-solved voltage so the loop starts satisfied and the flow still
+    converges. Generators regulating a remote bus (deported / shared control)
+    are skipped so the zones stay independent. Convergence with the outer loop on
+    is verified; on divergence the extension is removed. Run after a load flow,
+    before ``add_shared_voltage_control``.
+    """
+    buses = network.get_buses()
+    bbs = network.get_busbar_sections(all_attributes=True)
+    gens = network.get_generators(all_attributes=True)
+    gens = gens[gens["voltage_regulator_on"]]
+
+    def solved(bus: str) -> bool:
+        return (bus in buses.index and math.isfinite(buses.at[bus, "v_mag"])
+                and buses.at[bus, "v_mag"] > 0)
+
+    def pilot_id(bus: str) -> str:
+        # A node-breaker pilot point must reference a busbar section (a bus-view
+        # bus id trips a NullPointerException in OpenLoadFlow); a bus-breaker
+        # network has no busbar sections, so the bus id itself is used.
+        cand = bbs[bbs["bus_id"] == bus]
+        return cand.index[0] if not cand.empty else bus
+
+    # Locally regulating generators only (regulated bus == own bus): skip the
+    # ones deported or repointed to a remote bus so zones do not overlap them.
+    local = [g for g in gens.index
+             if gens.at[g, "regulated_bus_id"] == gens.at[g, "bus_id"]
+             and solved(gens.at[g, "bus_id"])]
+    if len(local) < units_per_zone:
+        return {"zones": 0, "units": 0}
+
+    by_vl: dict = {}
+    for g in local:
+        by_vl.setdefault(gens.at[g, "voltage_level_id"], []).append(g)
+    multi = sorted((sorted(grp) for grp in by_vl.values() if len(grp) >= units_per_zone),
+                   key=lambda grp: grp[0])
+
+    used: set = set()
+    zone_units: list = []
+    # Coherent zones from multi-unit voltage levels first (from the tail, so they
+    # do not collide with the head groups add_shared_voltage_control uses).
+    for grp in reversed(multi):
+        if len(zone_units) >= zones:
+            break
+        picked = grp[:units_per_zone]
+        zone_units.append(picked)
+        used.update(picked)
+    # Fall back to any spare locally regulating generators.
+    if len(zone_units) < zones:
+        spare = [g for g in local if g not in used]
+        i = 0
+        while len(zone_units) < zones and i + units_per_zone <= len(spare):
+            zone_units.append(spare[i:i + units_per_zone])
+            i += units_per_zone
+    if not zone_units:
+        return {"zones": 0, "units": 0}
+
+    names = [f"SEC_VC_ZONE_{i}" for i in range(len(zone_units))]
+    z_target, z_bus, u_id, u_zone = [], [], [], []
+    for name, units in zip(names, zone_units):
+        pilot_bus = gens.at[units[0], "bus_id"]
+        z_target.append(float(buses.at[pilot_bus, "v_mag"]))
+        z_bus.append(pilot_id(pilot_bus))
+        u_id.extend(units)
+        u_zone.extend([name] * len(units))
+
+    zones_df = pd.DataFrame({
+        "name": pd.Series(names, dtype=str),
+        "target_v": pd.Series(z_target, dtype=float),
+        "bus_ids": pd.Series(z_bus, dtype=str)}).set_index("name")
+    units_df = pd.DataFrame({
+        "unit_id": pd.Series(u_id, dtype=str),
+        "zone_name": pd.Series(u_zone, dtype=str),
+        "participate": pd.Series([True] * len(u_id), dtype=bool)}).set_index("unit_id")
+    network.create_extensions("secondaryVoltageControl", [zones_df, units_df])
+
+    if not _secondary_vc_converges(network):
+        network.remove_extensions("secondaryVoltageControl", names)
+        return {"zones": 0, "units": 0, "diverged": True}
+    return {"zones": len(zone_units), "units": len(u_id)}
+
+
+# ---------------------------------------------------------------------------
 # Static var compensator voltage control
 # ---------------------------------------------------------------------------
 

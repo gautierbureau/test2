@@ -31,7 +31,7 @@ small amount that stays inside the device's range.
 | 3 | **Transformer** voltage control (`transformerVoltageControlMode`) | ✅ **done** — `complete_network.add_transformer_voltage_control` keeps a converging subset (~300) of the ratio tap changers regulating (all 5 655 at once diverge) and verifies the outer loop converges | done | converges (subset) |
 | 4 | **Shunt** voltage control (`shuntVoltageControlMode`) | ✅ **done** — source shunts are single-section (can't control), so `complete_network.add_shunt_voltage_control` adds a few multi-section switchable shunts (node-breaker bays) regulating to the bus solved V | done | converges |
 | 5 | **Phase** control (`phaseShifterRegulationOn`) | ✅ **done** — `complete_network.add_phase_control` enables the 74 PTCs as CURRENT_LIMITER with a threshold above base-case flow (passive until overload, like real shifters) | done | converges with phase control on |
-| 6 | **Secondary** voltage control (`secondaryVoltageControl`) | extension absent | add a control zone: one pilot bus + a couple of controlling generators, target = pilot's solved V | trivial |
+| 6 | **Secondary** voltage control (`secondaryVoltageControl`) | ✅ **done** — `complete_network.add_secondary_voltage_control` builds two control zones (each a pilot bus + two locally-regulating generators), pilot target = the pilot bus's solved voltage; verified converging with the outer loop on | done | converges |
 | 7 | **SVC** voltage control + slope (`voltagePerReactivePowerControl`, `svcVoltageMonitoring`) | ✅ **done** — `complete_network.add_svc_voltage_control` puts the SVCs in VOLTAGE mode (target = bus solved V) with a voltage-droop slope | done | converges |
 | 8 | **SVC standby automaton** (`svcVoltageMonitoring`) | ✅ **done** — `complete_network.add_svc_standby_automaton` puts a converging subset of SVCs into standby (fixed `b0` = 0) with thresholds recentred on the bus's solved voltage, so the automaton stays in its neutral band | done | converges |
 | 9 | **Generator remote reactive-power control** (`generatorReactivePowerRemoteControl`) | ❌ **unreachable from pypowsybl 1.16.1** — the OLF outer loop exists (param `generatorReactivePowerRemoteControl`) and powsybl-core has the `RemoteReactivePowerControl` extension, but pypowsybl does not register its dataframe adapter (absent from `get_extensions_names()`; `create_extensions('generatorRemoteReactivePowerControl', …)` throws NPE) | needs a pypowsybl release that wires the extension, or hand-authored XIIDM | — |
@@ -42,7 +42,7 @@ small amount that stays inside the device's range.
 
 ## Notes
 
-- Done items (1–5, 7, 8, 12) are pure attribute/extension edits on existing
+- Done items (1–8, 12) are pure attribute/extension edits on existing
   components and keep the base case converged because each target is set to the
   already-solved value; they are added as `complete_network`-style completions
   with a before/after load-flow check.

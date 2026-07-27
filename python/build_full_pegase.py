@@ -153,6 +153,11 @@ def build_full(input_path: str, output_path: str,
         # changers regulating (thousands at once do not converge).
         print(f"transformer voltage ctl : {cn.add_transformer_voltage_control(net)}")
 
+        # Secondary voltage control: a couple of control zones (pilot bus + a few
+        # generators) - run before shared control so the zone generators are still
+        # locally regulating.
+        print(f"secondary voltage ctl   : {cn.add_secondary_voltage_control(net)}")
+
         # Shared voltage control: several generators in a voltage level co-regulate
         # one common bus.
         print(f"shared voltage control  : {cn.add_shared_voltage_control(net)}")
