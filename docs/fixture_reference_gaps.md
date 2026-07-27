@@ -1,7 +1,7 @@
 # Fixture vs reference-network gap tracker
 
 Tracks how close our fully-enhanced fixtures (`python/data/*.xiidm.gz`, built by
-`python/build_full_pegase.py`) come to a real reference network, by object-type
+`python/build_full_network.py`) come to a real reference network, by object-type
 and extension counts. Use it to decide what to build next and to record progress.
 
 - **Reference**: a real node-breaker network summary (7,803 buses / 6,900
@@ -15,7 +15,7 @@ Regenerate and re-compare:
 
 ```
 cd python
-python3 build_full_pegase.py -i case13659pegase.xiidm -o data/pegase13659_full.xiidm.gz
+python3 build_full_network.py -i case13659pegase.xiidm -o data/pegase13659_full.xiidm.gz
 python3 network_summary.py --all -i data/pegase13659_full.xiidm.gz
 ```
 

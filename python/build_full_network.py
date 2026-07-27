@@ -1,24 +1,36 @@
 """
-Build a fully-enhanced network in one pass.
+Build a fully-enhanced network in one pass, from any solvable input.
 
-Loads a case (e.g. a raw PEGASE snapshot, which ships with almost no operational
-data), runs a single AC load flow, applies every completion in this repo -
-reactive limits, ratio tap changers, a realistic generation mix, apparent-power
-ratings, active power control, synthetic measurements, observability flags and
-load-flow-based current + apparent-power limit sets - and, by default, rebuilds
-the result as a node-breaker network (busbar sections + switches, with element
-properties carried across) so it looks like a real one.
+The pipeline is not tied to a particular case: it loads any network pypowsybl
+can import (XIIDM, MATPOWER .mat/.m - with real base voltages kept automatically
+- PSS/E .raw, CGMES, ...), runs a single AC load flow, and applies every
+completion in this repo - reactive limits, ratio tap changers, a realistic
+generation mix, apparent-power ratings, active power control, synthetic
+measurements, observability flags and load-flow-based current + apparent-power
+limit sets. By default it then rebuilds the result as a node-breaker network
+(busbar sections + switches, with element properties carried across) and adds
+the OpenLoadFlow outer-loop modeling that only node-breaker feeder bays can
+carry (remote / shared / secondary / transformer / shunt voltage control, SVC
+standby automaton, HVDC angle-droop control) so it looks like a real one.
 
 The output exercises most of the IIDM object types and extensions, useful as a
 realistic reference to compare synthetic networks against (see
 network_summary.py).
 
-The completions run on the (converging) bus-breaker network and the node-breaker
-conversion is done last: the rebuilt topology loses the source's solved voltage
-profile, and a flat-start load flow does not reconverge on very large cases
-(e.g. ACTIVSg70k), so re-solving the node-breaker model is avoided. The
-converter carries operational limits and element-keyed extensions across; the
-measurements and observability extensions it does not copy are re-attached here.
+Requirements and graceful degradation:
+- The input must solve an AC load flow (a flat start is tried first, then a
+  DC-based start); if neither converges the build aborts.
+- Every completion operates on whatever equipment exists and reports counts, so
+  features a given network lacks simply report zero (no EHV generators -> no
+  remote voltage control, no multi-unit voltage levels -> no shared control, ...).
+- The completions run on the (converging) bus-breaker network and the
+  node-breaker conversion is done last, because the rebuilt topology loses the
+  source's solved voltage profile and a flat start does not reconverge on very
+  large cases (e.g. ACTIVSg70k). The node-breaker modeling steps each re-check
+  convergence (DC init) and roll back if the rebuilt model does not reconverge,
+  so on such a case they report zero while the fixture is still written. The
+  converter carries operational limits and element-keyed extensions across; the
+  measurements and observability extensions it does not copy are re-attached here.
 """
 
 from __future__ import annotations
@@ -195,7 +207,7 @@ def _main(argv=None) -> int:
     parser.add_argument("-i", "--input", required=True,
                         help="input case; a .mat/.m MATPOWER case is imported with "
                              "real base voltages automatically (e.g. case13659pegase.mat)")
-    parser.add_argument("-o", "--output", default="pegase13659_full.xiidm.gz",
+    parser.add_argument("-o", "--output", default="full_network.xiidm.gz",
                         help="output network; a .gz suffix writes it compressed "
                              "(default: %(default)s)")
     parser.add_argument("--bus-breaker", action="store_true",
