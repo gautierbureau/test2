@@ -5,24 +5,38 @@ import com.powsybl.iidm.network.Bus;
 import com.powsybl.iidm.network.Connectable;
 import com.powsybl.iidm.network.EnergySource;
 import com.powsybl.iidm.network.Generator;
+import com.powsybl.iidm.network.Identifiable;
 import com.powsybl.iidm.network.Injection;
 import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Load;
 import com.powsybl.iidm.network.MinMaxReactiveLimits;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.PhaseTapChanger;
 import com.powsybl.iidm.network.RatioTapChanger;
 import com.powsybl.iidm.network.RatioTapChangerAdder;
+import com.powsybl.iidm.network.ReactiveCapabilityCurveAdder;
 import com.powsybl.iidm.network.ReactiveLimits;
 import com.powsybl.iidm.network.ReactiveLimitsKind;
+import com.powsybl.iidm.network.Substation;
 import com.powsybl.iidm.network.Terminal;
 import com.powsybl.iidm.network.ThreeSides;
 import com.powsybl.iidm.network.TwoWindingsTransformer;
+import com.powsybl.iidm.network.VoltageLevel;
 import com.powsybl.iidm.network.extensions.ActivePowerControl;
 import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
 import com.powsybl.iidm.network.extensions.BranchObservability;
 import com.powsybl.iidm.network.extensions.BranchObservabilityAdder;
+import com.powsybl.iidm.network.extensions.DiscreteMeasurement;
+import com.powsybl.iidm.network.extensions.DiscreteMeasurements;
+import com.powsybl.iidm.network.extensions.DiscreteMeasurementsAdder;
+import com.powsybl.iidm.network.extensions.GeneratorShortCircuit;
+import com.powsybl.iidm.network.extensions.GeneratorShortCircuitAdder;
+import com.powsybl.iidm.network.extensions.IdentifiableShortCircuit;
+import com.powsybl.iidm.network.extensions.IdentifiableShortCircuitAdder;
 import com.powsybl.iidm.network.extensions.InjectionObservability;
 import com.powsybl.iidm.network.extensions.InjectionObservabilityAdder;
+import com.powsybl.iidm.network.extensions.LoadDetail;
+import com.powsybl.iidm.network.extensions.LoadDetailAdder;
 import com.powsybl.iidm.network.extensions.Measurement;
 import com.powsybl.iidm.network.extensions.Measurements;
 import com.powsybl.iidm.network.extensions.MeasurementsAdder;
@@ -652,6 +666,284 @@ public final class NetworkCompleter {
             }
         }
         return 1.0;
+    }
+
+    // -----------------------------------------------------------------------
+    // Reactive capability curves
+    // -----------------------------------------------------------------------
+
+    public static final int DEFAULT_CURVE_POINTS = 3;
+    public static final double DEFAULT_CURVE_MIN_Q_FRACTION = 0.2;
+
+    public record ReactiveCurveStats(int generators, int set) {
+    }
+
+    /**
+     * Give generators a P-dependent reactive capability curve (the classic
+     * "D-curve") instead of a flat MIN_MAX band: a half-band of
+     * {@code sqrt(ratedS^2 - P^2)} (the armature-current circle, floored at
+     * {@code DEFAULT_CURVE_MIN_Q_FRACTION * ratedS}) sampled at {@code points}
+     * active-power values from 0 to maxP, never narrower than the generator's
+     * existing band. Needs rated_s (run {@link #addRatedS} first); generators
+     * without a usable rating or maxP are left as they are, and with
+     * {@code onlyMissing} those already using a curve are skipped.
+     */
+    public static ReactiveCurveStats addReactiveCapabilityCurves(Network network, int points,
+                                                                 boolean onlyMissing) {
+        if (points < 2) {
+            throw new IllegalArgumentException("points must be >= 2");
+        }
+        int considered = 0;
+        int set = 0;
+        for (Generator g : network.getGenerators()) {
+            ReactiveLimits rl = g.getReactiveLimits();
+            if (onlyMissing && rl != null && rl.getKind() == ReactiveLimitsKind.CURVE) {
+                continue;
+            }
+            considered++;
+            double s = g.getRatedS();
+            double pmax = g.getMaxP();
+            if (!(Double.isFinite(s) && s > 0 && Double.isFinite(pmax) && pmax > 0)) {
+                continue;
+            }
+            double emax = 0.0;
+            double emin = 0.0;
+            if (rl instanceof MinMaxReactiveLimits mm) {
+                emax = Double.isFinite(mm.getMaxQ()) ? mm.getMaxQ() : 0.0;
+                emin = Double.isFinite(mm.getMinQ()) ? mm.getMinQ() : 0.0;
+            }
+            double floor = DEFAULT_CURVE_MIN_Q_FRACTION * s;
+            ReactiveCapabilityCurveAdder adder = g.newReactiveCapabilityCurve();
+            for (int k = 0; k < points; k++) {
+                double p = pmax * k / (points - 1);
+                double arm = Math.sqrt(Math.max(s * s - p * p, floor * floor));
+                adder.beginPoint()
+                        .setP(p)
+                        .setMaxQ(Math.max(arm, emax))    // never narrower than the existing band
+                        .setMinQ(Math.min(-arm, emin))
+                        .endPoint();
+            }
+            adder.add();
+            set++;
+        }
+        return new ReactiveCurveStats(considered, set);
+    }
+
+    // -----------------------------------------------------------------------
+    // Load detail (fixed vs variable P/Q split)
+    // -----------------------------------------------------------------------
+
+    public static final double DEFAULT_LOAD_FIXED_FRACTION = 0.4;
+
+    public record LoadDetailStats(int loads, int set) {
+    }
+
+    /**
+     * Split each load's P/Q into a fixed and a variable part (the
+     * {@code detail} extension). A load flow cannot infer the split, so a
+     * representative constant {@code fixedFraction} (default 40 % fixed, 60 %
+     * variable) is applied to every load's p0/q0.
+     */
+    public static LoadDetailStats addLoadDetail(Network network, double fixedFraction,
+                                                boolean onlyMissing) {
+        if (!(fixedFraction >= 0.0 && fixedFraction <= 1.0)) {
+            throw new IllegalArgumentException("fixedFraction must be in [0, 1]");
+        }
+        double var = 1.0 - fixedFraction;
+        int set = 0;
+        for (Load load : network.getLoads()) {
+            if (onlyMissing && load.getExtension(LoadDetail.class) != null) {
+                continue;
+            }
+            double p0 = load.getP0();
+            double q0 = load.getQ0();
+            load.newExtension(LoadDetailAdder.class)
+                    .withFixedActivePower(fixedFraction * p0)
+                    .withVariableActivePower(var * p0)
+                    .withFixedReactivePower(fixedFraction * q0)
+                    .withVariableReactivePower(var * q0)
+                    .add();
+            set++;
+        }
+        return new LoadDetailStats(set, set);
+    }
+
+    // -----------------------------------------------------------------------
+    // Discrete measurements (tap-changer positions)
+    // -----------------------------------------------------------------------
+
+    public record DiscreteMeasurementsStats(int measurements) {
+    }
+
+    /**
+     * Attach a discrete tap-position measurement to every ratio and phase tap
+     * changer (the discrete counterpart of the analog {@code measurements}
+     * extension), keyed by the transformer. With {@code onlyMissing},
+     * transformers already carrying the extension are skipped.
+     */
+    public static DiscreteMeasurementsStats addDiscreteMeasurements(Network network,
+                                                                    boolean onlyMissing) {
+        int count = 0;
+        for (TwoWindingsTransformer tx : network.getTwoWindingsTransformers()) {
+            if (onlyMissing && tx.getExtension(DiscreteMeasurements.class) != null) {
+                continue;
+            }
+            DiscreteMeasurements<?> meas = null;
+            if (tx.getRatioTapChanger() != null) {
+                meas = getOrCreateDiscreteMeasurements(tx);
+                addTapPosition(meas, tx.getId(), DiscreteMeasurement.TapChanger.RATIO_TAP_CHANGER,
+                        tx.getRatioTapChanger().getTapPosition());
+                count++;
+            }
+            if (tx.getPhaseTapChanger() != null) {
+                if (meas == null) {
+                    meas = getOrCreateDiscreteMeasurements(tx);
+                }
+                addTapPosition(meas, tx.getId(), DiscreteMeasurement.TapChanger.PHASE_TAP_CHANGER,
+                        tx.getPhaseTapChanger().getTapPosition());
+                count++;
+            }
+        }
+        return new DiscreteMeasurementsStats(count);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <I extends Identifiable<I>> DiscreteMeasurements<I> getOrCreateDiscreteMeasurements(
+            I identifiable) {
+        DiscreteMeasurements<I> meas = identifiable.getExtension(DiscreteMeasurements.class);
+        if (meas == null) {
+            identifiable.newExtension(DiscreteMeasurementsAdder.class).add();
+            meas = identifiable.getExtension(DiscreteMeasurements.class);
+        }
+        return meas;
+    }
+
+    private static void addTapPosition(DiscreteMeasurements<?> meas, String elementId,
+                                       DiscreteMeasurement.TapChanger tapChanger, int position) {
+        String kind = tapChanger.name();
+        meas.newDiscreteMeasurement()
+                .setId(elementId + "_" + kind + "_POS")
+                .setType(DiscreteMeasurement.Type.TAP_POSITION)
+                .setTapChanger(tapChanger)
+                .setValue(position)
+                .setValid(true)
+                .add();
+    }
+
+    // -----------------------------------------------------------------------
+    // Element properties (free-form string key/value tags)
+    // -----------------------------------------------------------------------
+
+    public static final int DEFAULT_REGION_COUNT = 10;
+    public static final String DEFAULT_COUNTRY = "XX";
+
+    public record PropertiesStats(int substations, int voltageLevels) {
+    }
+
+    static String voltageClass(double nominalV) {
+        if (nominalV >= 300.0) {
+            return "EHV";
+        }
+        if (nominalV >= 100.0) {
+            return "HV";
+        }
+        if (nominalV >= 1.0) {
+            return "MV";
+        }
+        return "LV";
+    }
+
+    /**
+     * Tag substations and voltage levels with representative string properties:
+     * each substation gets {@code region} (partitioned into {@code regionCount}
+     * zones by sorted id) and {@code country_code}; each voltage level gets
+     * {@code voltage_class} (EHV/HV/MV/LV from nominal kV). Keys avoid native
+     * IIDM attribute names so they do not collide on a rebuild. With
+     * {@code onlyMissing} elements that already carry any property are left alone.
+     */
+    public static PropertiesStats addProperties(Network network, int regionCount, String country,
+                                                boolean onlyMissing) {
+        if (regionCount < 1) {
+            throw new IllegalArgumentException("regionCount must be >= 1");
+        }
+        int subCount = 0;
+        List<Substation> subs = network.getSubstationStream()
+                .sorted(Comparator.comparing(Substation::getId)).toList();
+        for (Substation s : subs) {
+            if (onlyMissing && !s.getPropertyNames().isEmpty()) {
+                continue;
+            }
+            s.setProperty("region", String.format("REGION_%02d", subCount % regionCount));
+            s.setProperty("country_code", country);
+            subCount++;
+        }
+        int vlCount = 0;
+        List<VoltageLevel> vls = network.getVoltageLevelStream()
+                .sorted(Comparator.comparing(VoltageLevel::getId)).toList();
+        for (VoltageLevel vl : vls) {
+            if (onlyMissing && !vl.getPropertyNames().isEmpty()) {
+                continue;
+            }
+            vl.setProperty("voltage_class", voltageClass(vl.getNominalV()));
+            vlCount++;
+        }
+        return new PropertiesStats(subCount, vlCount);
+    }
+
+    // -----------------------------------------------------------------------
+    // Short-circuit data
+    // -----------------------------------------------------------------------
+
+    public static final double DEFAULT_TRANS_X_PU = 0.25;
+    public static final double DEFAULT_SUBTRANS_X_PU = 0.18;
+    private static final Map<String, Double> IP_MAX_BY_CLASS = Map.of(
+            "EHV", 40000.0, "HV", 31500.0, "MV", 25000.0, "LV", 10000.0);
+    private static final double IP_MIN_FRACTION = 0.3;
+
+    public record ShortCircuitStats(int generators, int voltageLevels) {
+    }
+
+    /**
+     * Add short-circuit data used by fault calculations: transient /
+     * subtransient reactances on every generator (sized
+     * {@code x_pu * Vn^2 / ratedS}, step-up transformer reactance 0), and
+     * representative min/max short-circuit current by voltage class on every
+     * voltage level. Run {@link #addRatedS} first for the best sizing; with
+     * {@code onlyMissing} elements already carrying the extension are skipped.
+     */
+    public static ShortCircuitStats addShortCircuit(Network network, boolean onlyMissing) {
+        int genCount = 0;
+        for (Generator g : network.getGenerators()) {
+            if (onlyMissing && g.getExtension(GeneratorShortCircuit.class) != null) {
+                continue;
+            }
+            double vn = g.getTerminal().getVoltageLevel().getNominalV();
+            double s = g.getRatedS();
+            if (!(Double.isFinite(s) && s > 0)) {
+                double cap = genCapacity(g);
+                s = cap > 0 ? cap / DEFAULT_GENERATOR_POWER_FACTOR : 0.0;
+            }
+            double base = (vn > 0 && s > 0) ? (vn * vn / s) : 1.0;
+            g.newExtension(GeneratorShortCircuitAdder.class)
+                    .withDirectTransX(DEFAULT_TRANS_X_PU * base)
+                    .withDirectSubtransX(DEFAULT_SUBTRANS_X_PU * base)
+                    .withStepUpTransformerX(0.0)
+                    .add();
+            genCount++;
+        }
+        int vlCount = 0;
+        for (VoltageLevel vl : network.getVoltageLevels()) {
+            if (onlyMissing && vl.getExtension(IdentifiableShortCircuit.class) != null) {
+                continue;
+            }
+            double ipMax = IP_MAX_BY_CLASS.get(voltageClass(vl.getNominalV()));
+            vl.newExtension(IdentifiableShortCircuitAdder.class)
+                    .withIpMin(ipMax * IP_MIN_FRACTION)
+                    .withIpMax(ipMax)
+                    .add();
+            vlCount++;
+        }
+        return new ShortCircuitStats(genCount, vlCount);
     }
 
     // -----------------------------------------------------------------------
