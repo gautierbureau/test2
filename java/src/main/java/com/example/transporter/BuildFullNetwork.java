@@ -1,5 +1,7 @@
 package com.example.transporter;
 
+import com.powsybl.computation.local.LocalComputationManager;
+import com.powsybl.iidm.network.ImportConfig;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.serde.NetworkSerDe;
 import com.powsybl.loadflow.LoadFlow;
@@ -7,6 +9,8 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
 
 import java.nio.file.Path;
+import java.util.Locale;
+import java.util.Properties;
 
 /**
  * Build a fully-enhanced network in one pass — the Java port of
@@ -35,6 +39,21 @@ public final class BuildFullNetwork {
 
     private static void log(String name, Object stats) {
         System.out.printf("%-26s: %s%n", name, stats);
+    }
+
+    /**
+     * Load a case, keeping real base voltages for MATPOWER inputs. The MATPOWER
+     * importer flattens bus base voltages to 1 kV by default;
+     * {@code matpower.import.ignore-base-voltage=false} keeps the real nominal kV,
+     * which everything voltage-dependent relies on. Applied for .mat/.m inputs.
+     */
+    static Network loadCase(Path input) {
+        Properties params = new Properties();
+        String name = input.getFileName().toString().toLowerCase(Locale.ROOT);
+        if (name.endsWith(".mat") || name.endsWith(".m")) {
+            params.put("matpower.import.ignore-base-voltage", "false");
+        }
+        return Network.read(input, LocalComputationManager.getDefault(), ImportConfig.load(), params);
     }
 
     /** Apply every enhancement to {@code net} in place and return it. */
@@ -134,7 +153,7 @@ public final class BuildFullNetwork {
             System.exit(2);
         }
         boolean nodeBreaker = args.length < 3 || !"--bus-breaker".equals(args[2]);
-        Network net = Network.read(Path.of(args[0]));
+        Network net = loadCase(Path.of(args[0]));
         net = buildFull(net, nodeBreaker);
         NetworkSerDe.write(net, Path.of(args[1]));
         System.out.println("Wrote " + args[1]);

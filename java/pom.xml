@@ -72,6 +72,19 @@
             <version>${powsybl-core.version}</version>
         </dependency>
 
+        <!-- MATPOWER (.mat) and PSS/E (.raw) importers, for regenerating the
+             PEGASE / RTE / ACTIVSg fixtures from their source cases -->
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-matpower-converter</artifactId>
+            <version>${powsybl-core.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-psse-converter</artifactId>
+            <version>${powsybl-core.version}</version>
+        </dependency>
+
         <!-- Complex arithmetic -->
         <dependency>
             <groupId>org.apache.commons</groupId>

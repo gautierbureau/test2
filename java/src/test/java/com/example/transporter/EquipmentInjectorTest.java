@@ -64,6 +64,22 @@ class EquipmentInjectorTest {
     }
 
     @Test
+    void equipmentExtensionsSurviveNodeBreakerConversion() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        EquipmentInjector.addStaticVarCompensators(net, 1, 0.01);
+        EquipmentInjector.addBatteries(net, 1, 25.0);
+        EquipmentInjector.addHvdcLinks(net, 1, 200.0);
+        Network nb = BusToNodeBreakerConverter.convert(net);
+        // The converter carries the equipment-injected control extensions across.
+        assertNotNull(nb.getStaticVarCompensator("SYN_SVC_0")
+                .getExtension(StandbyAutomaton.class));
+        assertNotNull(nb.getBattery("SYN_BAT_0")
+                .getExtension(com.powsybl.iidm.network.extensions.VoltageRegulation.class));
+        assertNotNull(nb.getHvdcLine("SYN_HVDC_0")
+                .getExtension(com.powsybl.iidm.network.extensions.HvdcOperatorActivePowerRange.class));
+    }
+
+    @Test
     void addEquipmentAllTypesAndConverges() {
         Network net = IeeeCdfNetworkFactory.create14();
         EquipmentInjector.EquipmentStats stats = EquipmentInjector.addEquipment(net);

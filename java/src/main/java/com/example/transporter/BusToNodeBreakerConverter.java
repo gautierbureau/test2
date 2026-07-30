@@ -3,9 +3,18 @@ package com.example.transporter;
 import com.powsybl.iidm.modification.topology.CreateBranchFeederBaysBuilder;
 import com.powsybl.iidm.modification.topology.CreateFeederBayBuilder;
 import com.powsybl.iidm.network.*;
+import com.powsybl.iidm.network.Battery;
+import com.powsybl.iidm.network.HvdcLine;
+import com.powsybl.iidm.network.StaticVarCompensator;
 import com.powsybl.iidm.network.extensions.ActivePowerControl;
 import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
 import com.powsybl.iidm.network.extensions.BusbarSectionPositionAdder;
+import com.powsybl.iidm.network.extensions.HvdcOperatorActivePowerRange;
+import com.powsybl.iidm.network.extensions.HvdcOperatorActivePowerRangeAdder;
+import com.powsybl.iidm.network.extensions.StandbyAutomaton;
+import com.powsybl.iidm.network.extensions.StandbyAutomatonAdder;
+import com.powsybl.iidm.network.extensions.VoltageRegulation;
+import com.powsybl.iidm.network.extensions.VoltageRegulationAdder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -901,6 +910,43 @@ public final class BusToNodeBreakerConverter {
                     .withParticipate(apc.isParticipate())
                     .withDroop(apc.getDroop())
                     .withParticipationFactor(apc.getParticipationFactor())
+                    .add();
+        }
+        // Equipment-injected control extensions the rebuild would otherwise drop.
+        for (StaticVarCompensator src : source.getStaticVarCompensators()) {
+            StandbyAutomaton sa = src.getExtension(StandbyAutomaton.class);
+            StaticVarCompensator dst = target.getStaticVarCompensator(src.getId());
+            if (sa == null || dst == null) {
+                continue;
+            }
+            dst.newExtension(StandbyAutomatonAdder.class)
+                    .withStandbyStatus(sa.isStandby()).withB0(sa.getB0())
+                    .withLowVoltageThreshold(sa.getLowVoltageThreshold())
+                    .withLowVoltageSetpoint(sa.getLowVoltageSetpoint())
+                    .withHighVoltageThreshold(sa.getHighVoltageThreshold())
+                    .withHighVoltageSetpoint(sa.getHighVoltageSetpoint())
+                    .add();
+        }
+        for (Battery src : source.getBatteries()) {
+            VoltageRegulation vr = src.getExtension(VoltageRegulation.class);
+            Battery dst = target.getBattery(src.getId());
+            if (vr == null || dst == null) {
+                continue;
+            }
+            dst.newExtension(VoltageRegulationAdder.class)
+                    .withVoltageRegulatorOn(vr.isVoltageRegulatorOn())
+                    .withRegulatingTerminal(dst.getTerminal())
+                    .add();
+        }
+        for (HvdcLine src : source.getHvdcLines()) {
+            HvdcOperatorActivePowerRange opr = src.getExtension(HvdcOperatorActivePowerRange.class);
+            HvdcLine dst = target.getHvdcLine(src.getId());
+            if (opr == null || dst == null) {
+                continue;
+            }
+            dst.newExtension(HvdcOperatorActivePowerRangeAdder.class)
+                    .withOprFromCS1toCS2(opr.getOprFromCS1toCS2())
+                    .withOprFromCS2toCS1(opr.getOprFromCS2toCS1())
                     .add();
         }
     }
