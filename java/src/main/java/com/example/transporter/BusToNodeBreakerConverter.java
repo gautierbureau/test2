@@ -5,6 +5,7 @@ import com.powsybl.iidm.modification.topology.CreateFeederBayBuilder;
 import com.powsybl.iidm.network.*;
 import com.powsybl.iidm.network.extensions.ActivePowerControl;
 import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
+import com.powsybl.iidm.network.extensions.BusbarSectionPositionAdder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -353,13 +354,17 @@ public final class BusToNodeBreakerConverter {
         VoltageLevel tvl = target.getVoltageLevel(vl.getId());
         VoltageLevel.NodeBreakerView nbv = tvl.getNodeBreakerView();
         int node = 0;
+        int sectionIndex = 0;
         for (Bus bus : vl.getBusBreakerView().getBuses()) {
             int perBus = busToBbs.sectionCountFor(bus.getId());
             int prevNode = -1;
             for (int k = 0; k < perBus; k++) {
                 int myNode = node++;
                 String bbsId = bus.getId() + BBS_SUFFIX + (perBus > 1 ? "_" + (k + 1) : "");
-                nbv.newBusbarSection().setId(bbsId).setNode(myNode).add();
+                var bbs = nbv.newBusbarSection().setId(bbsId).setNode(myNode).add();
+                // One busbar per voltage level; sections numbered 1..k across it.
+                bbs.newExtension(BusbarSectionPositionAdder.class)
+                        .withBusbarIndex(1).withSectionIndex(++sectionIndex).add();
                 busToBbs.register(bus.getId(), bbsId);
                 if (prevNode >= 0) {
                     nbv.newBreaker()
