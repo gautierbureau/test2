@@ -106,6 +106,13 @@ public final class BuildFullNetwork {
             log("svc standby automaton", VoltageControlCompleter.addSvcStandbyAutomaton(net, null));
             log("hvdc ac emulation", VoltageControlCompleter.addHvdcAcEmulation(
                     net, VoltageControlCompleter.DEFAULT_HVDC_DROOP, null));
+
+            // Java-only modeling (reachable in powsybl-core but not pypowsybl).
+            log("generator remote reactive", JavaOnlyModeling
+                    .addGeneratorRemoteReactivePowerControl(net, 1));
+            log("transformer reactive ctl", JavaOnlyModeling
+                    .addTransformerReactivePowerControl(net, 1));
+            log("automation systems", JavaOnlyModeling.addAutomationSystems(net, 1));
         }
 
         // Solve with a DC-based init so the fixture is saved converged; reported,
