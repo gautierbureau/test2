@@ -1,4 +1,4 @@
-pypowsybl>=1.5
+pypowsybl>=1.16
 numpy
 pandas
 pytest>=7.0

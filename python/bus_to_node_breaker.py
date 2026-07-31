@@ -135,9 +135,11 @@ def convert(source: pn.Network, busbar_sections_per_bus: int = 1,
     # Tap changers, once every terminal exists.
     _copy_ratio_tap_changers(source, target)
     _copy_phase_tap_changers(source, target)
-    # Operational limits and extensions, once every element exists.
+    # Operational limits, extensions and properties, once every element exists.
     _copy_operational_limits(source, target)
     _copy_extensions(source, target)
+    _copy_properties(source, target)
+    _set_busbar_section_positions(target)
 
     return target
 
@@ -258,7 +260,7 @@ def _copy_generator_reactive_limits(source, target):
     if len(curve_ids):
         pts = source.get_reactive_capability_curve_points()
         pts = pts[pts.index.get_level_values(0).isin(curve_ids)].reset_index()
-        target.create_reactive_capability_curve_points(
+        target.create_curve_reactive_limits(
             id=list(pts["id"]), p=list(pts["p"]),
             min_q=list(pts["min_q"]), max_q=list(pts["max_q"]))
 
@@ -322,7 +324,7 @@ def _copy_reactive_limits(source, target, ids, getter_name):
     if len(curve_ids):
         pts = source.get_reactive_capability_curve_points()
         pts = pts[pts.index.get_level_values(0).isin(curve_ids)].reset_index()
-        target.create_reactive_capability_curve_points(
+        target.create_curve_reactive_limits(
             id=list(pts["id"]), p=list(pts["p"]),
             min_q=list(pts["min_q"]), max_q=list(pts["max_q"]))
 
@@ -554,20 +556,23 @@ def _copy_ratio_tap_changers(source, target):
 
 
 def _copy_phase_tap_changers(source, target):
-    ptc = source.get_phase_tap_changers()
+    ptc = source.get_phase_tap_changers(all_attributes=True)
     if ptc.empty:
         return
     txs = source.get_2_windings_transformers(all_attributes=True)
     ptc = ptc[(ptc["side"] == "") & ptc.index.isin(txs.index)]
     if ptc.empty:
         return
+    # Create every phase tap changer non-regulating first (with its threshold
+    # already set), then switch regulation on where the source had it: the model
+    # rejects a regulating changer whose setpoint is not yet in place.
     ptc_df = pd.DataFrame({
         "id": list(ptc.index),
         "tap": list(ptc["tap"]),
         "low_tap": list(ptc["low_tap"]),
         "regulation_mode": list(ptc["regulation_mode"]),
         "target_deadband": [d if pd.notna(d) else 0.0 for d in ptc["target_deadband"]],
-        "regulating": list(ptc["regulating"]),
+        "regulating": [False] * len(ptc),
         "regulated_side": [_regulated_side(t, b, txs)
                            for t, b in zip(ptc.index, ptc["regulating_bus_id"])],
     }).set_index("id")
@@ -575,6 +580,13 @@ def _copy_phase_tap_changers(source, target):
     steps = steps[steps["id"].isin(ptc.index)]
     steps_df = steps[["id", "rho", "alpha", "r", "x", "g", "b"]].set_index("id")
     target.create_phase_tap_changers(ptc_df, steps_df)
+    # create_phase_tap_changers takes no regulation_value, so apply the setpoint
+    # then switch regulation on for the changers that had it in the source.
+    reg_ids = [t for t in ptc.index if bool(ptc.at[t, "regulating"])]
+    if reg_ids:
+        target.update_phase_tap_changers(
+            id=reg_ids, regulation_value=[float(ptc.at[t, "regulation_value"]) for t in reg_ids])
+        target.update_phase_tap_changers(id=reg_ids, regulating=[True] * len(reg_ids))
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +682,49 @@ def _copy_extensions(source: pn.Network, target: pn.Network) -> None:
             target.create_extensions(name, df)
         except Exception:  # noqa: BLE001 - element absent or schema mismatch
             continue
+
+
+def _copy_properties(source: pn.Network, target: pn.Network) -> None:
+    """Copy element key/value properties onto the rebuilt network.
+
+    Properties are stored per identifiable; the rebuild keeps every id except
+    the (recomputed) buses, so properties are re-applied to whatever elements
+    still exist. ``get_elements_properties`` returns a long (id, key, value)
+    frame; ``add_elements_properties`` wants one call per key.
+    """
+    props = source.get_elements_properties()
+    if props.empty:
+        return
+    existing = set(target.get_elements(pn.ElementType.IDENTIFIABLE).index)
+    for key, group in props.groupby("key"):
+        sub = group[group.index.isin(existing)]
+        if sub.empty:
+            continue
+        target.add_elements_properties(
+            id=list(sub.index), **{key: [str(v) for v in sub["value"]]})
+
+
+def _set_busbar_section_positions(target: pn.Network) -> None:
+    """Give every rebuilt busbar section a ``busbarSectionPosition`` extension.
+
+    Node-breaker models tag each busbar section with a (busbar, section) index
+    for single-line-diagram layout. The rebuild creates the sections without it,
+    so number them per voltage level: one busbar, sections 1..k.
+    """
+    bbs = target.get_busbar_sections(all_attributes=True)
+    if bbs.empty:
+        return
+    section_of = {}
+    ids, busbar_index, section_index = [], [], []
+    for bid, b in bbs.sort_index().iterrows():
+        vl = b["voltage_level_id"]
+        nxt = section_of.get(vl, 0) + 1
+        section_of[vl] = nxt
+        ids.append(bid)
+        busbar_index.append(1)
+        section_index.append(nxt)
+    target.create_extensions("busbarSectionPosition", id=ids,
+                             busbar_index=busbar_index, section_index=section_index)
 
 
 # ---------------------------------------------------------------------------

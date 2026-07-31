@@ -14,13 +14,28 @@ import pytest
 
 from complete_network import (
     add_active_power_control,
+    add_discrete_measurements,
+    add_hvdc_ac_emulation,
+    add_load_detail,
     add_measurements,
     add_observability,
+    add_phase_control,
+    add_properties,
     add_rated_s,
     add_ratio_tap_changers,
+    add_reactive_capability_curves,
     add_reactive_limits,
+    add_secondary_voltage_control,
+    add_shared_voltage_control,
+    add_short_circuit,
+    add_shunt_voltage_control,
+    add_svc_standby_automaton,
+    add_svc_voltage_control,
+    add_transformer_voltage_control,
     set_generation_mix,
 )
+from add_equipment import add_hvdc_links, add_static_var_compensators
+from bus_to_node_breaker import convert
 from tests.test_bus_to_node_breaker import _extended_ieee14
 
 
@@ -300,6 +315,272 @@ def test_observability_flags():
     # Idempotent under only_missing.
     again = add_observability(net)
     assert again["injections"] == 0 and again["branches"] == 0
+
+
+def test_load_detail_splits_fixed_and_variable():
+    net = pn.create_ieee14()
+    stats = add_load_detail(net, fixed_fraction=0.4)
+    assert stats["set"] == len(net.get_loads())
+    det = net.get_extensions("detail")
+    loads = net.get_loads()
+    lid = loads.index[0]
+    p0 = loads.at[lid, "p0"]
+    assert det.at[lid, "fixed_p0"] == pytest.approx(0.4 * p0)
+    assert det.at[lid, "variable_p0"] == pytest.approx(0.6 * p0)
+    # Fixed + variable reconstruct the original setpoint.
+    assert det.at[lid, "fixed_p0"] + det.at[lid, "variable_p0"] == pytest.approx(p0)
+    # Idempotent under only_missing.
+    assert add_load_detail(net)["set"] == 0
+    with pytest.raises(ValueError):
+        add_load_detail(pn.create_ieee14(), fixed_fraction=1.5)
+
+
+def test_discrete_measurements_on_tap_changers():
+    net = pn.create_ieee14()
+    add_ratio_tap_changers(net)
+    stats = add_discrete_measurements(net)
+    assert stats["measurements"] == len(net.get_ratio_tap_changers())
+    dm = net.get_extensions("discreteMeasurements")
+    assert set(dm["type"]) == {"TAP_POSITION"}
+    assert set(dm["tap_changer"]) == {"RATIO_TAP_CHANGER"}
+    # Idempotent under only_missing.
+    assert add_discrete_measurements(net)["measurements"] == 0
+
+
+def test_properties_tag_substations_and_voltage_levels():
+    net = pn.create_ieee14()
+    stats = add_properties(net, region_count=4, country="FR")
+    assert stats["substations"] == len(net.get_substations())
+    assert stats["voltage_levels"] == len(net.get_voltage_levels())
+    props = net.get_elements_properties()
+    assert set(props["key"]) == {"region", "country_code", "voltage_class"}
+    assert set(props[props["key"] == "country_code"]["value"]) == {"FR"}
+    # Region partitioned into at most region_count zones; voltage class sensible.
+    assert len(set(props[props["key"] == "region"]["value"])) <= 4
+    assert set(props[props["key"] == "voltage_class"]["value"]) <= {"EHV", "HV", "MV", "LV"}
+    # Keys avoid the native substation 'country' field, so a rebuild still works.
+    assert "country" not in set(props["key"])
+    # Idempotent under only_missing.
+    assert add_properties(net) == {"substations": 0, "voltage_levels": 0}
+
+
+def test_reactive_capability_curves_replace_bands():
+    net = pn.create_ieee14()
+    add_rated_s(net)
+    stats = add_reactive_capability_curves(net, points=3)
+    assert stats["set"] == len(net.get_generators())
+    gens = net.get_generators(all_attributes=True)
+    assert (gens["reactive_limits_kind"] == "CURVE").all()
+
+    pts = net.get_reactive_capability_curve_points()
+    # 3 points per generator.
+    assert len(pts) == 3 * len(gens)
+    gid = gens.index[0]
+    gp = pts.loc[gid].sort_values("p")
+    # Band narrows (or stays) as P rises, and is symmetric-ish about zero.
+    assert gp["max_q"].iloc[-1] <= gp["max_q"].iloc[0] + 1e-6
+    assert (gp["max_q"] > 0).all() and (gp["min_q"] < 0).all()
+    # Idempotent under only_missing (all are CURVE now).
+    assert add_reactive_capability_curves(net)["set"] == 0
+    with pytest.raises(ValueError):
+        add_reactive_capability_curves(pn.create_ieee14(), points=1)
+
+
+def test_phase_control_enables_regulation_and_converges():
+    net = pn.create_four_substations_node_breaker_network()
+    lf.run_ac(net)
+    # Free the phase shifter's transformer of its competing ratio-tap regulation.
+    rtc = net.get_ratio_tap_changers(all_attributes=True)
+    if not rtc.empty:
+        net.update_ratio_tap_changers(id=list(rtc.index[rtc["regulating"]]),
+                                      regulating=[False] * int(rtc["regulating"].sum()))
+    stats = add_phase_control(net)
+    assert stats["phase_shifters"] >= 1
+    ptc = net.get_phase_tap_changers(all_attributes=True)
+    on = ptc[ptc["regulating"]]
+    assert set(on["regulation_mode"]) == {"CURRENT_LIMITER"}
+    # Converges with the phase-control outer loop enabled.
+    res = lf.run_ac(net, lf.Parameters(phase_shifter_regulation_on=True))
+    assert res[0].status.name == "CONVERGED"
+    # Idempotent: already-regulating shifters are not re-enabled.
+    assert add_phase_control(net)["phase_shifters"] == 0
+
+
+def _two_gen_voltage_level():
+    """A voltage level with two generators on separate buses feeding a load."""
+    n = pn.create_empty("shared")
+    n.create_substations(id=["S1", "S2"])
+    n.create_voltage_levels(id=["VG", "VL"], substation_id=["S1", "S2"],
+                            topology_kind=["BUS_BREAKER", "BUS_BREAKER"],
+                            nominal_v=[225.0, 225.0])
+    n.create_buses(id=["A1", "A2"], voltage_level_id=["VG", "VG"])
+    n.create_buses(id=["LB"], voltage_level_id=["VL"])
+    n.create_generators(id=["GA"], voltage_level_id=["VG"], bus_id=["A1"], target_p=[60],
+                        min_p=[0], max_p=[200], target_v=[230], voltage_regulator_on=[True])
+    n.create_generators(id=["GB"], voltage_level_id=["VG"], bus_id=["A2"], target_p=[60],
+                        min_p=[0], max_p=[200], target_v=[230], voltage_regulator_on=[True])
+    n.create_loads(id=["LD"], voltage_level_id=["VL"], bus_id=["LB"], p0=[100], q0=[20])
+    n.create_lines(id=["L1"], voltage_level1_id=["VG"], bus1_id=["A1"],
+                   voltage_level2_id=["VL"], bus2_id=["LB"], r=[1], x=[10], g1=[0], b1=[0], g2=[0], b2=[0])
+    n.create_lines(id=["L2"], voltage_level1_id=["VG"], bus1_id=["A2"],
+                   voltage_level2_id=["VL"], bus2_id=["LB"], r=[1], x=[10], g1=[0], b1=[0], g2=[0], b2=[0])
+    return n
+
+
+def test_shared_voltage_control_groups_generators_on_one_bus():
+    net = convert(_two_gen_voltage_level())
+    lf.run_ac(net)
+    stats = add_shared_voltage_control(net)
+    assert stats["groups"] == 1 and stats["generators"] == 1
+    g = net.get_generators(all_attributes=True)
+    # Both generators now regulate the same bus.
+    assert g.at["GA", "regulated_bus_id"] == g.at["GB", "regulated_bus_id"]
+    assert lf.run_ac(net)[0].status.name == "CONVERGED"
+
+
+def test_hvdc_ac_emulation_enables_and_converges():
+    net = pn.create_ieee14()
+    add_hvdc_links(net, count=1)   # HVDC link + angle-droop extension (disabled)
+    net = convert(net)
+    lf.run_ac(net)
+    stats = add_hvdc_ac_emulation(net)
+    assert stats["hvdc"] == 1
+    ext = net.get_extensions("hvdcAngleDroopActivePowerControl")
+    assert bool(ext["enabled"].all())
+    assert lf.run_ac(net)[0].status.name == "CONVERGED"
+
+
+def test_shunt_voltage_control_adds_switchable_regulating_shunts():
+    net = convert(pn.create_ieee14())
+    lf.run_ac(net)
+    stats = add_shunt_voltage_control(net, count=2)
+    assert stats["shunts"] == 2
+    sh = net.get_shunt_compensators(all_attributes=True)
+    added = sh[sh.index.str.startswith("SYN_SHVC_")]
+    assert (added["max_section_count"] > 1).all()          # switchable
+    assert bool(added["voltage_regulation_on"].all())      # regulating
+    assert lf.run_ac(net, lf.Parameters(
+        shunt_compensator_voltage_control_on=True))[0].status.name == "CONVERGED"
+
+
+def test_transformer_voltage_control_keeps_converging_subset():
+    net = pn.create_ieee14()
+    add_ratio_tap_changers(net)  # makes all transformers voltage-regulating
+    n_reg = int(net.get_ratio_tap_changers(all_attributes=True)["regulating"].sum())
+    assert n_reg > 0
+    lf.run_ac(net)
+    stats = add_transformer_voltage_control(net, count=n_reg)
+    assert stats["regulating"] >= 1
+    # The kept set converges with the transformer-voltage-control loop on.
+    res = lf.run_ac(net, lf.Parameters(transformer_voltage_control_on=True))
+    assert res[0].status.name == "CONVERGED"
+    rtc = net.get_ratio_tap_changers(all_attributes=True)
+    assert int(rtc["regulating"].sum()) == stats["regulating"]
+
+
+def test_svc_voltage_control_enables_and_converges():
+    net = pn.create_ieee14()
+    add_static_var_compensators(net, count=2)
+    lf.run_ac(net)
+    stats = add_svc_voltage_control(net)
+    assert stats["svcs"] == 2
+    svc = net.get_static_var_compensators(all_attributes=True)
+    on = svc[svc["regulating"]]
+    assert set(on["regulation_mode"]) == {"VOLTAGE"}
+    assert len(net.get_extensions("voltagePerReactivePowerControl")) == 2
+    # Converges both by default (svcVoltageMonitoring) and with the slope on.
+    assert lf.run_ac(net)[0].status.name == "CONVERGED"
+    assert lf.run_ac(net, lf.Parameters(
+        provider_parameters={"voltagePerReactivePowerControl": "true"}))[0].status.name == "CONVERGED"
+    # Idempotent: already-regulating SVCs are not touched again.
+    assert add_svc_voltage_control(net)["svcs"] == 0
+
+
+def test_svc_standby_automaton_enables_and_converges():
+    net = pn.create_ieee14()
+    add_static_var_compensators(net, count=2)
+    lf.run_ac(net)
+    add_svc_voltage_control(net)
+    stats = add_svc_standby_automaton(net)
+    assert stats["standby"] >= 1
+    ext = net.get_extensions("standbyAutomaton")
+    on = ext[ext["standby"]]
+    assert len(on) == stats["standby"]
+    # Standby b0 is neutral and the thresholds bracket the solved voltage.
+    assert set(on["b0"]) == {0.0}
+    svc = net.get_static_var_compensators(all_attributes=True)
+    buses = net.get_buses()
+    for sid in on.index:
+        v = buses.at[svc.at[sid, "bus_id"], "v_mag"]
+        assert on.at[sid, "low_voltage_threshold"] < v < on.at[sid, "high_voltage_threshold"]
+    assert lf.run_ac(net)[0].status.name == "CONVERGED"
+
+
+def test_svc_standby_automaton_no_svcs():
+    net = pn.create_ieee14()
+    assert add_svc_standby_automaton(net)["standby"] == 0
+
+
+def test_secondary_voltage_control_two_zones_and_converges():
+    net = pn.create_ieee14()
+    lf.run_ac(net)
+    stats = add_secondary_voltage_control(net, zones=2, units_per_zone=2)
+    assert stats["zones"] == 2
+    assert stats["units"] == 4
+    zt = net.get_extensions("secondaryVoltageControl", "zones")
+    ut = net.get_extensions("secondaryVoltageControl", "units")
+    assert len(zt) == 2
+    assert len(ut) == 4
+    # Each zone controls a distinct pilot bus, target = its solved voltage.
+    buses = net.get_buses()
+    for name in zt.index:
+        pilot = zt.at[name, "bus_ids"]
+        assert math.isclose(zt.at[name, "target_v"], buses.at[pilot, "v_mag"], rel_tol=1e-6)
+    assert bool(ut["participate"].all())
+    # Converges both with the outer loop off and on.
+    assert lf.run_ac(net)[0].status.name == "CONVERGED"
+    assert lf.run_ac(net, lf.Parameters(
+        provider_parameters={"secondaryVoltageControl": "true"}))[0].status.name == "CONVERGED"
+
+
+def test_secondary_voltage_control_node_breaker_uses_busbar_pilot():
+    # In node-breaker the pilot point must reference a busbar section, not a
+    # bus-view bus id (the latter trips a NullPointerException in OpenLoadFlow).
+    nb = convert(_extended_ieee14())
+    lf.run_ac(nb)
+    stats = add_secondary_voltage_control(nb, zones=2, units_per_zone=2)
+    assert stats["zones"] == 2
+    zt = nb.get_extensions("secondaryVoltageControl", "zones")
+    bbs = set(nb.get_busbar_sections().index)
+    assert set(zt["bus_ids"]).issubset(bbs)
+    assert lf.run_ac(nb, lf.Parameters(
+        provider_parameters={"secondaryVoltageControl": "true"}))[0].status.name == "CONVERGED"
+
+
+def test_secondary_voltage_control_insufficient_generators():
+    net = pn.create_ieee14()
+    lf.run_ac(net)
+    # Asking for more units per zone than there are regulating generators yields none.
+    assert add_secondary_voltage_control(net, zones=1, units_per_zone=99)["zones"] == 0
+
+
+def test_short_circuit_on_generators_and_voltage_levels():
+    net = pn.create_ieee14()
+    add_rated_s(net)
+    stats = add_short_circuit(net)
+    assert stats["generators"] == len(net.get_generators())
+    assert stats["voltage_levels"] == len(net.get_voltage_levels())
+
+    gsc = net.get_extensions("generatorShortCircuit")
+    # Reactances are positive ohms, subtransient below transient.
+    assert (gsc["direct_trans_x"] > 0).all()
+    assert (gsc["direct_sub_trans_x"] < gsc["direct_trans_x"]).all()
+
+    isc = net.get_extensions("identifiableShortCircuit")
+    assert set(isc["equipment_type"]) == {"VOLTAGE_LEVEL"}
+    assert (isc["ip_min"] < isc["ip_max"]).all()
+    # Idempotent under only_missing.
+    assert add_short_circuit(net) == {"generators": 0, "voltage_levels": 0}
 
 
 def test_measurements_reject_bad_std():

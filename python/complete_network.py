@@ -147,6 +147,62 @@ def _sized_reactive(g, power_factor: float, threshold: float) -> Optional[float]
 
 
 # ---------------------------------------------------------------------------
+# Reactive capability curves
+# ---------------------------------------------------------------------------
+
+DEFAULT_CURVE_POINTS = 3
+DEFAULT_CURVE_MIN_Q_FRACTION = 0.2  # floor on the half-band as a share of rated_s
+
+
+def add_reactive_capability_curves(
+    network: pn.Network,
+    points: int = DEFAULT_CURVE_POINTS,
+    only_missing: bool = True,
+) -> dict:
+    """Give generators a reactive **capability curve** instead of a flat band.
+
+    Real machines have a P-dependent reactive range (the classic "D-curve"): the
+    reactive band is widest at low active power and narrows as ``P`` approaches
+    the machine rating. This replaces a generator's MIN_MAX band with a
+    piecewise curve sampled at ``points`` active-power values from 0 to ``maxP``,
+    with a half-band of ``sqrt(ratedS^2 - P^2)`` (the armature-current circle,
+    floored at ``DEFAULT_CURVE_MIN_Q_FRACTION * ratedS``).
+
+    The band never drops below the generator's existing MIN_MAX limits, so the
+    base case stays feasible. Needs ``rated_s`` (run :func:`add_rated_s` first);
+    generators without a usable rating or ``maxP`` are left as they are. With
+    ``only_missing`` generators that already use a CURVE are skipped.
+    """
+    if points < 2:
+        raise ValueError("points must be >= 2")
+    gens = network.get_generators(all_attributes=True)
+    if only_missing:
+        gens = gens[gens["reactive_limits_kind"] != "CURVE"]
+
+    ids, ps, min_qs, max_qs = [], [], [], []
+    set_count = 0
+    for gid, g in gens.iterrows():
+        s = g["rated_s"]
+        pmax = g["max_p"]
+        if not (math.isfinite(s) and s > 0 and math.isfinite(pmax) and pmax > 0):
+            continue
+        emax = g["max_q"] if math.isfinite(g["max_q"]) else 0.0
+        emin = g["min_q"] if math.isfinite(g["min_q"]) else 0.0
+        floor = DEFAULT_CURVE_MIN_Q_FRACTION * s
+        for k in range(points):
+            p = pmax * k / (points - 1)
+            arm = math.sqrt(max(s * s - p * p, floor * floor))
+            ids.append(gid)
+            ps.append(p)
+            max_qs.append(max(arm, emax))   # never narrower than the existing band
+            min_qs.append(min(-arm, emin))
+        set_count += 1
+    if ids:
+        network.create_curve_reactive_limits(id=ids, p=ps, min_q=min_qs, max_q=max_qs)
+    return {"generators": len(gens), "set": set_count}
+
+
+# ---------------------------------------------------------------------------
 # Ratio tap changers
 # ---------------------------------------------------------------------------
 
@@ -228,6 +284,456 @@ def _side2_voltage(tx, buses) -> Optional[float]:
     if not (math.isfinite(v) and v > 0):
         return None
     return float(v)
+
+
+# ---------------------------------------------------------------------------
+# Phase control (phase-shifting transformers)
+# ---------------------------------------------------------------------------
+
+DEFAULT_PHASE_CURRENT_MARGIN = 1.5  # limiter threshold as a multiple of base flow
+
+
+def add_phase_control(network: pn.Network, count: Optional[int] = None,
+                      current_margin: float = DEFAULT_PHASE_CURRENT_MARGIN) -> dict:
+    """Turn idle phase-shifting transformers into current limiters.
+
+    Exercises OpenLoadFlow's phase-control outer loop (run with
+    ``phaseShifterRegulationOn``). Existing phase tap changers are enabled in
+    ``CURRENT_LIMITER`` mode with a threshold set above the current they already
+    carry (``current_margin`` x the base-case i1), which is how real phase
+    shifters behave - passive until an overload - so the outer loop is present
+    but does not trip and the flow still converges. Active-power-control mode was
+    tried but destabilised the flow when many shifters act at once. Run after a
+    load flow so the base-case currents are known.
+    """
+    ptc = network.get_phase_tap_changers(all_attributes=True)
+    ptc = ptc[~ptc["regulating"]]
+    if ptc.empty:
+        return {"phase_shifters": 0}
+    tx = network.get_2_windings_transformers(all_attributes=True)
+    # A transformer allows only one regulating control, so skip any whose ratio
+    # tap changer already regulates.
+    rtc = network.get_ratio_tap_changers(all_attributes=True)
+    rtc_regulating = set(rtc.index[rtc["regulating"]]) if not rtc.empty else set()
+
+    ids, values = [], []
+    for tid in ptc.index:
+        eid = tid[0] if isinstance(tid, tuple) else tid
+        if eid not in tx.index or eid in rtc_regulating:
+            continue
+        i1 = tx.at[eid, "i1"]
+        if not math.isfinite(i1):
+            continue
+        ids.append(eid)
+        values.append(max(float(i1) * current_margin, 100.0))
+        if count is not None and len(ids) >= count:
+            break
+    if not ids:
+        return {"phase_shifters": 0}
+    # Set the threshold before enabling regulation: the model rejects turning
+    # regulation on while the threshold is still unset.
+    network.update_phase_tap_changers(
+        id=ids, regulation_mode=["CURRENT_LIMITER"] * len(ids),
+        regulation_value=values, target_deadband=[10.0] * len(ids),
+        regulated_side=["ONE"] * len(ids))
+    network.update_phase_tap_changers(id=ids, regulating=[True] * len(ids))
+    return {"phase_shifters": len(ids)}
+
+
+# ---------------------------------------------------------------------------
+# Transformer voltage control
+# ---------------------------------------------------------------------------
+
+DEFAULT_TVC_COUNT = 300      # regulating ratio tap changers to keep active
+DEFAULT_TVC_DEADBAND = 2.0   # kV deadband, wide enough to avoid tap hunting
+
+
+def _tvc_converges(network: pn.Network) -> bool:
+    params = lf.Parameters(distributed_slack=True, use_reactive_limits=True,
+                           voltage_init_mode=lf.VoltageInitMode.DC_VALUES,
+                           transformer_voltage_control_on=True)
+    return lf.run_ac(network, params)[0].status.name == "CONVERGED"
+
+
+def add_transformer_voltage_control(network: pn.Network,
+                                    count: int = DEFAULT_TVC_COUNT,
+                                    deadband: float = DEFAULT_TVC_DEADBAND) -> dict:
+    """Keep a converging subset of ratio tap changers regulating voltage.
+
+    ``add_ratio_tap_changers`` makes every added tap changer voltage-regulating;
+    with the transformer-voltage-control outer loop on, thousands of them acting
+    at once do not converge. This trims the regulating set to an evenly spread
+    subset (widening its deadband) and verifies the outer loop converges,
+    halving the count until it does. The disabled tap changers keep their
+    structure (they are transparent with the outer loop off). Run on the final
+    (node-breaker) network, after a load flow.
+    """
+    rtc = network.get_ratio_tap_changers(all_attributes=True)
+    regulating = list(rtc.index[rtc["regulating"]])
+    if not regulating:
+        return {"regulating": 0, "disabled": 0}
+    network.update_ratio_tap_changers(
+        id=regulating, regulating=[False] * len(regulating))
+
+    n = min(count, len(regulating))
+    while n >= 1:
+        subset = [regulating[(i * len(regulating)) // n] for i in range(n)]
+        network.update_ratio_tap_changers(
+            id=subset, regulating=[True] * n, target_deadband=[deadband] * n)
+        if _tvc_converges(network):
+            return {"regulating": n, "disabled": len(regulating) - n}
+        network.update_ratio_tap_changers(id=subset, regulating=[False] * n)
+        n //= 2
+    return {"regulating": 0, "disabled": len(regulating)}
+
+
+# ---------------------------------------------------------------------------
+# HVDC AC emulation (angle droop)
+# ---------------------------------------------------------------------------
+
+DEFAULT_HVDC_DROOP = 20.0  # MW per degree of AC angle difference
+
+
+def add_hvdc_ac_emulation(network: pn.Network, droop: float = DEFAULT_HVDC_DROOP,
+                          count: Optional[int] = None) -> dict:
+    """Switch HVDC links to AC emulation (angle-droop active power control).
+
+    Under AC emulation the DC active power follows ``p0 + droop * (theta1 -
+    theta2)`` of the AC buses at the two converter stations, exercising
+    OpenLoadFlow's HVDC AC-emulation outer loop. The endpoints are far apart, so
+    ``p0`` is set to cancel the droop term at the already-solved angle difference
+    (the link keeps its current, ~zero, transfer) and the flow still converges.
+    Run on the node-breaker network after a load flow.
+    """
+    hv = network.get_hvdc_lines(all_attributes=True)
+    if hv.empty:
+        return {"hvdc": 0}
+    vsc = network.get_vsc_converter_stations(all_attributes=True)
+    buses = network.get_buses()
+    ids, droops, p0s = [], [], []
+    for h in hv.index:
+        c1, c2 = hv.at[h, "converter_station1_id"], hv.at[h, "converter_station2_id"]
+        if c1 not in vsc.index or c2 not in vsc.index:
+            continue
+        b1, b2 = vsc.at[c1, "bus_id"], vsc.at[c2, "bus_id"]
+        if b1 not in buses.index or b2 not in buses.index:
+            continue
+        th1, th2 = buses.at[b1, "v_angle"], buses.at[b2, "v_angle"]
+        if not (math.isfinite(th1) and math.isfinite(th2)):
+            continue
+        ids.append(h)
+        droops.append(droop)
+        p0s.append(-droop * float(th1 - th2))  # cancel droop term at solved angles
+        if count is not None and len(ids) >= count:
+            break
+    if not ids:
+        return {"hvdc": 0}
+    network.create_extensions("hvdcAngleDroopActivePowerControl",
+                              id=ids, droop=droops, p0=p0s, enabled=[True] * len(ids))
+    return {"hvdc": len(ids)}
+
+
+# ---------------------------------------------------------------------------
+# Shunt voltage control (switchable shunts)
+# ---------------------------------------------------------------------------
+
+DEFAULT_SHUNT_VC_COUNT = 20
+DEFAULT_SHUNT_SECTIONS = 4
+DEFAULT_SHUNT_B_PER_SECTION = 0.001  # S per section (small, ~a few MVar at EHV)
+
+
+def add_shunt_voltage_control(network: pn.Network, count: int = DEFAULT_SHUNT_VC_COUNT,
+                              sections: int = DEFAULT_SHUNT_SECTIONS,
+                              b_per_section: float = DEFAULT_SHUNT_B_PER_SECTION,
+                              deadband: float = 1.0) -> dict:
+    """Add switchable shunts that regulate voltage (shunt voltage control).
+
+    The source cases only carry single-section fixed shunts, which cannot control
+    voltage, so this creates a few multi-section switchable shunts (node-breaker
+    feeder bays) and puts them in voltage regulation targeting their bus's
+    already-solved voltage. Exercises OpenLoadFlow's shunt voltage control
+    (``shuntCompensatorVoltageControlOn``) while still converging. Run on the
+    node-breaker network after a load flow.
+    """
+    buses = network.get_buses()
+    bbs = network.get_busbar_sections(all_attributes=True)
+    cand = [b for b in sorted(bbs.index)
+            if bbs.at[b, "bus_id"] in buses.index
+            and math.isfinite(buses.at[bbs.at[b, "bus_id"], "v_mag"])
+            and buses.at[bbs.at[b, "bus_id"], "v_mag"] > 0]
+    if not cand:
+        return {"shunts": 0}
+    n = min(count, len(cand))
+    sel = [cand[(i * len(cand)) // n] for i in range(n)]
+    ids = [f"SYN_SHVC_{i}" for i in range(n)]
+
+    shunt_df = pd.DataFrame([{
+        "id": ids[i], "model_type": "LINEAR", "section_count": 1,
+        "bus_or_busbar_section_id": sel[i], "position_order": 9000 + i,
+        "target_v": 0.0, "target_deadband": deadband,
+    } for i in range(n)]).set_index("id")
+    linear_df = pd.DataFrame([{
+        "id": ids[i], "g_per_section": 0.0, "b_per_section": b_per_section,
+        "max_section_count": sections,
+    } for i in range(n)]).set_index("id")
+    pn.create_shunt_compensator_bay(network, shunt_df, linear_model_df=linear_df)
+
+    sh = network.get_shunt_compensators(all_attributes=True)
+    target_v = [float(buses.at[sh.at[i, "bus_id"], "v_mag"]) for i in ids]
+    # Set the setpoint before enabling regulation (the model rejects a NaN setpoint).
+    network.update_shunt_compensators(id=ids, target_v=target_v,
+                                      target_deadband=[deadband] * n)
+    network.update_shunt_compensators(id=ids, voltage_regulation_on=[True] * n)
+    return {"shunts": n}
+
+
+# ---------------------------------------------------------------------------
+# Shared (coordinated) generator voltage control
+# ---------------------------------------------------------------------------
+
+DEFAULT_SHARED_VC_GROUPS = 50
+
+
+def add_shared_voltage_control(network: pn.Network,
+                               count: int = DEFAULT_SHARED_VC_GROUPS) -> dict:
+    """Make several generators in a voltage level co-regulate one common bus.
+
+    Exercises OpenLoadFlow's shared (coordinated) voltage control, where more
+    than one generator controls the same bus and the reactive output is split
+    between them. In a multi-unit voltage level every generator is pointed at the
+    first generator's bus (a common busbar), all with that bus's already-solved
+    voltage as target, so the control is satisfied and the flow still converges.
+    Only ``count`` groups are set up (one activated control is enough; forcing
+    all of them is unnecessary). Run on the node-breaker network after a load flow.
+    """
+    buses = network.get_buses()
+    bbs = network.get_busbar_sections(all_attributes=True)
+    gens = network.get_generators(all_attributes=True)
+    gens = gens[gens["voltage_regulator_on"]]
+    by_vl = {}
+    for gid in gens.index:
+        by_vl.setdefault(gens.at[gid, "voltage_level_id"], []).append(gid)
+    groups = sorted((grp for grp in by_vl.values() if len(grp) >= 2), key=lambda x: x[0])
+
+    applied, secondaries = 0, 0
+    for grp in groups:
+        if applied >= count:
+            break
+        pilot = grp[0]
+        pbus = gens.at[pilot, "bus_id"]
+        cand = bbs[bbs["bus_id"] == pbus]
+        if pbus not in buses.index or cand.empty:
+            continue
+        v = buses.at[pbus, "v_mag"]
+        if not (math.isfinite(v) and v > 0):
+            continue
+        pbbs = cand.index[0]
+        secondary = grp[1:]
+        network.update_generators(
+            id=secondary, regulated_element_id=[pbbs] * len(secondary),
+            target_v=[float(v)] * len(secondary))
+        network.update_generators(id=[pilot], target_v=[float(v)])
+        applied += 1
+        secondaries += len(secondary)
+    return {"groups": applied, "generators": secondaries}
+
+
+# ---------------------------------------------------------------------------
+# Secondary voltage control (control zones)
+# ---------------------------------------------------------------------------
+
+DEFAULT_SECONDARY_VC_ZONES = 2
+DEFAULT_SECONDARY_VC_UNITS = 2
+
+
+def _secondary_vc_converges(network: pn.Network) -> bool:
+    params = lf.Parameters(distributed_slack=True, use_reactive_limits=True,
+                           voltage_init_mode=lf.VoltageInitMode.DC_VALUES,
+                           provider_parameters={"secondaryVoltageControl": "true"})
+    return lf.run_ac(network, params)[0].status.name == "CONVERGED"
+
+
+def add_secondary_voltage_control(network: pn.Network,
+                                  zones: int = DEFAULT_SECONDARY_VC_ZONES,
+                                  units_per_zone: int = DEFAULT_SECONDARY_VC_UNITS) -> dict:
+    """Set up a few secondary-voltage-control zones (the ``secondaryVoltageControl``
+    extension).
+
+    Each zone has a pilot bus and a set of controlling generators; with the
+    ``secondaryVoltageControl`` outer loop on, OpenLoadFlow adjusts the units'
+    reactive output together to hold the pilot voltage. Zones are built from
+    voltage levels that already carry two or more locally regulating generators
+    (an electrically coherent group), falling back to any spare locally
+    regulating generators, and the pilot target is set to the pilot bus's
+    already-solved voltage so the loop starts satisfied and the flow still
+    converges. Generators regulating a remote bus (deported / shared control)
+    are skipped so the zones stay independent. Convergence with the outer loop on
+    is verified; on divergence the extension is removed. Run after a load flow,
+    before ``add_shared_voltage_control``.
+    """
+    buses = network.get_buses()
+    bbs = network.get_busbar_sections(all_attributes=True)
+    gens = network.get_generators(all_attributes=True)
+    gens = gens[gens["voltage_regulator_on"]]
+
+    def solved(bus: str) -> bool:
+        return (bus in buses.index and math.isfinite(buses.at[bus, "v_mag"])
+                and buses.at[bus, "v_mag"] > 0)
+
+    def pilot_id(bus: str) -> str:
+        # A node-breaker pilot point must reference a busbar section (a bus-view
+        # bus id trips a NullPointerException in OpenLoadFlow); a bus-breaker
+        # network has no busbar sections, so the bus id itself is used.
+        cand = bbs[bbs["bus_id"] == bus]
+        return cand.index[0] if not cand.empty else bus
+
+    # Locally regulating generators only (regulated bus == own bus): skip the
+    # ones deported or repointed to a remote bus so zones do not overlap them.
+    local = [g for g in gens.index
+             if gens.at[g, "regulated_bus_id"] == gens.at[g, "bus_id"]
+             and solved(gens.at[g, "bus_id"])]
+    if len(local) < units_per_zone:
+        return {"zones": 0, "units": 0}
+
+    by_vl: dict = {}
+    for g in local:
+        by_vl.setdefault(gens.at[g, "voltage_level_id"], []).append(g)
+    multi = sorted((sorted(grp) for grp in by_vl.values() if len(grp) >= units_per_zone),
+                   key=lambda grp: grp[0])
+
+    used: set = set()
+    zone_units: list = []
+    # Coherent zones from multi-unit voltage levels first (from the tail, so they
+    # do not collide with the head groups add_shared_voltage_control uses).
+    for grp in reversed(multi):
+        if len(zone_units) >= zones:
+            break
+        picked = grp[:units_per_zone]
+        zone_units.append(picked)
+        used.update(picked)
+    # Fall back to any spare locally regulating generators.
+    if len(zone_units) < zones:
+        spare = [g for g in local if g not in used]
+        i = 0
+        while len(zone_units) < zones and i + units_per_zone <= len(spare):
+            zone_units.append(spare[i:i + units_per_zone])
+            i += units_per_zone
+    if not zone_units:
+        return {"zones": 0, "units": 0}
+
+    names = [f"SEC_VC_ZONE_{i}" for i in range(len(zone_units))]
+    z_target, z_bus, u_id, u_zone = [], [], [], []
+    for name, units in zip(names, zone_units):
+        pilot_bus = gens.at[units[0], "bus_id"]
+        z_target.append(float(buses.at[pilot_bus, "v_mag"]))
+        z_bus.append(pilot_id(pilot_bus))
+        u_id.extend(units)
+        u_zone.extend([name] * len(units))
+
+    zones_df = pd.DataFrame({
+        "name": pd.Series(names, dtype=str),
+        "target_v": pd.Series(z_target, dtype=float),
+        "bus_ids": pd.Series(z_bus, dtype=str)}).set_index("name")
+    units_df = pd.DataFrame({
+        "unit_id": pd.Series(u_id, dtype=str),
+        "zone_name": pd.Series(u_zone, dtype=str),
+        "participate": pd.Series([True] * len(u_id), dtype=bool)}).set_index("unit_id")
+    network.create_extensions("secondaryVoltageControl", [zones_df, units_df])
+
+    if not _secondary_vc_converges(network):
+        network.remove_extensions("secondaryVoltageControl", names)
+        return {"zones": 0, "units": 0, "diverged": True}
+    return {"zones": len(zone_units), "units": len(u_id)}
+
+
+# ---------------------------------------------------------------------------
+# Static var compensator voltage control
+# ---------------------------------------------------------------------------
+
+DEFAULT_SVC_SLOPE = 0.01  # kV per MVar (voltage droop of the SVC characteristic)
+
+
+def add_svc_voltage_control(network: pn.Network, slope: float = DEFAULT_SVC_SLOPE) -> dict:
+    """Put idle static var compensators into voltage regulation with a slope.
+
+    Exercises OpenLoadFlow's SVC voltage control (``svcVoltageMonitoring``, on by
+    default) and the voltage-droop characteristic (``voltagePerReactivePowerControl``
+    extension). Non-regulating SVCs are switched to ``VOLTAGE`` mode targeting the
+    voltage their bus already has in the solved base case, so the control is
+    satisfied from the start and the flow still converges. Run after a load flow.
+    """
+    svc = network.get_static_var_compensators(all_attributes=True)
+    svc = svc[~svc["regulating"]]
+    if svc.empty:
+        return {"svcs": 0}
+    buses = network.get_buses()
+    ids, target_v = [], []
+    for sid in svc.index:
+        b = svc.at[sid, "bus_id"]
+        if b in buses.index and math.isfinite(buses.at[b, "v_mag"]) and buses.at[b, "v_mag"] > 0:
+            ids.append(sid)
+            target_v.append(float(buses.at[b, "v_mag"]))
+    if not ids:
+        return {"svcs": 0}
+    network.update_static_var_compensators(
+        id=ids, regulation_mode=["VOLTAGE"] * len(ids),
+        target_v=target_v, regulating=[True] * len(ids))
+    network.create_extensions("voltagePerReactivePowerControl", id=ids,
+                              slope=[slope] * len(ids))
+    return {"svcs": len(ids)}
+
+
+def _svc_standby_converges(network: pn.Network) -> bool:
+    params = lf.Parameters(distributed_slack=True, use_reactive_limits=True,
+                           voltage_init_mode=lf.VoltageInitMode.DC_VALUES)
+    return lf.run_ac(network, params)[0].status.name == "CONVERGED"
+
+
+def add_svc_standby_automaton(network: pn.Network,
+                             count: Optional[int] = None) -> dict:
+    """Put a converging subset of SVCs into standby mode (standby automaton).
+
+    An SVC carrying the ``standbyAutomaton`` extension with ``standby`` on holds
+    a fixed susceptance ``b0`` while its regulated voltage stays inside
+    ``[low_voltage_threshold, high_voltage_threshold]`` and only switches to
+    voltage regulation (at the low/high setpoints) once the voltage leaves that
+    band - exercising OpenLoadFlow's standby-automaton handling
+    (``svcVoltageMonitoring``). The thresholds are recentred on the bus's
+    already-solved voltage (with ``b0`` = 0) so the automaton stays in its
+    neutral band and the flow still converges. Activates on all eligible SVCs,
+    halving the set until it converges. Run after a load flow, on SVCs already in
+    ``VOLTAGE`` mode (see ``add_svc_voltage_control``).
+    """
+    ext = network.get_extensions("standbyAutomaton")
+    if ext.empty:
+        return {"standby": 0}
+    svc = network.get_static_var_compensators(all_attributes=True)
+    buses = network.get_buses()
+    cand, vsolved = [], {}
+    for sid in ext.index:
+        if sid not in svc.index:
+            continue
+        b = svc.at[sid, "bus_id"]
+        if b in buses.index and math.isfinite(buses.at[b, "v_mag"]) and buses.at[b, "v_mag"] > 0:
+            cand.append(sid)
+            vsolved[sid] = float(buses.at[b, "v_mag"])
+    if not cand:
+        return {"standby": 0}
+
+    n = len(cand) if count is None else min(count, len(cand))
+    while n >= 1:
+        sel = [cand[(i * len(cand)) // n] for i in range(n)]
+        network.update_extensions(
+            "standbyAutomaton", id=sel, standby=[True] * n, b0=[0.0] * n,
+            low_voltage_threshold=[0.90 * vsolved[s] for s in sel],
+            low_voltage_setpoint=[0.95 * vsolved[s] for s in sel],
+            high_voltage_threshold=[1.10 * vsolved[s] for s in sel],
+            high_voltage_setpoint=[1.05 * vsolved[s] for s in sel])
+        if _svc_standby_converges(network):
+            return {"standby": n, "off": len(cand) - n}
+        network.update_extensions("standbyAutomaton", id=sel, standby=[False] * n)
+        n //= 2
+    return {"standby": 0, "off": len(cand)}
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +968,202 @@ def _elements_with_extension(network: pn.Network, name: str) -> set:
         return set(network.get_extensions(name).index)
     except Exception:  # noqa: BLE001 - extension table may be absent
         return set()
+
+
+# ---------------------------------------------------------------------------
+# Load detail (fixed vs variable P/Q split)
+# ---------------------------------------------------------------------------
+
+DEFAULT_LOAD_FIXED_FRACTION = 0.4  # share of a load that is constant (rest varies)
+
+
+def add_load_detail(
+    network: pn.Network,
+    fixed_fraction: float = DEFAULT_LOAD_FIXED_FRACTION,
+    only_missing: bool = True,
+) -> dict:
+    """Split each load's P/Q into a fixed and a variable part (``detail`` extension).
+
+    Real load records distinguish a constant component from a
+    voltage/time-varying one; a load flow cannot infer the split, so this applies
+    a representative constant ``fixed_fraction`` (default 40 % fixed, 60 %
+    variable) to every load's ``p0``/``q0``.
+    """
+    if not 0.0 <= fixed_fraction <= 1.0:
+        raise ValueError("fixed_fraction must be in [0, 1]")
+    loads = network.get_loads(all_attributes=True)
+    skip = _elements_with_extension(network, "detail") if only_missing else set()
+    loads = loads[~loads.index.isin(skip)]
+    if loads.empty:
+        return {"loads": 0, "set": 0}
+    var = 1.0 - fixed_fraction
+    df = pd.DataFrame({
+        "id": list(loads.index),
+        "fixed_p0": [fixed_fraction * p for p in loads["p0"]],
+        "variable_p0": [var * p for p in loads["p0"]],
+        "fixed_q0": [fixed_fraction * q for q in loads["q0"]],
+        "variable_q0": [var * q for q in loads["q0"]],
+    }).set_index("id")
+    network.create_extensions("detail", df)
+    return {"loads": len(loads), "set": len(df)}
+
+
+# ---------------------------------------------------------------------------
+# Discrete measurements (tap-changer positions)
+# ---------------------------------------------------------------------------
+
+def add_discrete_measurements(network: pn.Network, only_missing: bool = True) -> dict:
+    """Attach a discrete tap-position measurement to every tap changer.
+
+    Sets the ``discreteMeasurements`` extension with the current tap position of
+    each ratio and phase tap changer (the discrete counterpart of the analog
+    ``measurements`` extension). Keyed by the transformer id.
+    """
+    skip = _elements_with_extension(network, "discreteMeasurements") if only_missing else set()
+    rows = []
+    for getter, kind in (("get_ratio_tap_changers", "RATIO_TAP_CHANGER"),
+                         ("get_phase_tap_changers", "PHASE_TAP_CHANGER")):
+        tcs = getattr(network, getter)()
+        for idx, row in tcs.iterrows():
+            eid = idx[0] if isinstance(idx, tuple) else idx
+            side = idx[1] if isinstance(idx, tuple) else None
+            if eid in skip:
+                continue
+            suffix = f"{kind}_{side}" if side else kind
+            rows.append({
+                "element_id": eid, "id": f"{eid}_{suffix}_POS",
+                "type": "TAP_POSITION", "tap_changer": kind,
+                "value_type": "INT", "value": str(int(row["tap"])), "valid": True,
+            })
+    if not rows:
+        return {"measurements": 0}
+    network.create_extensions("discreteMeasurements",
+                              pd.DataFrame(rows).set_index("element_id"))
+    return {"measurements": len(rows)}
+
+
+# ---------------------------------------------------------------------------
+# Element properties (free-form string key/value tags)
+# ---------------------------------------------------------------------------
+
+DEFAULT_REGION_COUNT = 10
+DEFAULT_COUNTRY = "XX"
+
+
+def _voltage_class(nominal_v: float) -> str:
+    if nominal_v >= 300.0:
+        return "EHV"
+    if nominal_v >= 100.0:
+        return "HV"
+    if nominal_v >= 1.0:
+        return "MV"
+    return "LV"
+
+
+def add_properties(
+    network: pn.Network,
+    region_count: int = DEFAULT_REGION_COUNT,
+    country: str = DEFAULT_COUNTRY,
+    only_missing: bool = True,
+) -> dict:
+    """Tag substations and voltage levels with representative string properties.
+
+    IIDM properties are free-form string key/value pairs; real (often
+    CGMES-sourced) networks carry geographic/operational tags. A load flow cannot
+    infer them, so this lays down a deterministic set:
+
+    - each **substation** gets ``region`` (partitioned into ``region_count`` zones
+      by sorted id) and ``country_code``;
+    - each **voltage level** gets ``voltage_class`` (EHV/HV/MV/LV from nominal kV).
+
+    Keys deliberately avoid native IIDM attribute names (``country``, ``name``,
+    ``TSO``) so they don't collide when the network is rebuilt. With
+    ``only_missing`` elements that already carry any property are left alone.
+    """
+    if region_count < 1:
+        raise ValueError("region_count must be >= 1")
+    skip = set()
+    if only_missing:
+        props = network.get_elements_properties()
+        if not props.empty:
+            skip = set(props.index)
+
+    stats = {"substations": 0, "voltage_levels": 0}
+
+    subs = [s for s in sorted(network.get_substations().index) if s not in skip]
+    if subs:
+        network.add_elements_properties(
+            id=subs,
+            region=[f"REGION_{i % region_count:02d}" for i in range(len(subs))],
+            country_code=[country] * len(subs))
+        stats["substations"] = len(subs)
+
+    vls = network.get_voltage_levels()
+    vids = [v for v in sorted(vls.index) if v not in skip]
+    if vids:
+        network.add_elements_properties(
+            id=vids,
+            voltage_class=[_voltage_class(float(vls.at[v, "nominal_v"])) for v in vids])
+        stats["voltage_levels"] = len(vids)
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Short-circuit data
+# ---------------------------------------------------------------------------
+
+DEFAULT_TRANS_X_PU = 0.25       # transient reactance X'd (pu on machine base)
+DEFAULT_SUBTRANS_X_PU = 0.18    # subtransient reactance X''d (pu)
+# Representative max short-circuit current (A) by voltage class; min is a share.
+_IP_MAX_BY_CLASS = {"EHV": 40000.0, "HV": 31500.0, "MV": 25000.0, "LV": 10000.0}
+_IP_MIN_FRACTION = 0.3
+
+
+def add_short_circuit(network: pn.Network, only_missing: bool = True) -> dict:
+    """Add short-circuit data used by fault calculations.
+
+    - ``generatorShortCircuit`` on every generator: transient / subtransient
+      reactances in ohms, sized ``x_pu * Vn^2 / ratedS`` from the machine's
+      nominal voltage and rated apparent power (a step-up transformer reactance
+      of 0 is recorded).
+    - ``identifiableShortCircuit`` on every voltage level: representative min/max
+      short-circuit current (A) by voltage class.
+
+    A load flow cannot infer these, so representative per-unit reactances and
+    fault levels are used. Run :func:`add_rated_s` first for the best sizing.
+    """
+    nominal = network.get_voltage_levels()["nominal_v"]
+    stats = {"generators": 0, "voltage_levels": 0}
+
+    gens = network.get_generators(all_attributes=True)
+    skip = _elements_with_extension(network, "generatorShortCircuit") if only_missing else set()
+    gens = gens[~gens.index.isin(skip)]
+    if not gens.empty:
+        trans, subtrans = [], []
+        for _gid, g in gens.iterrows():
+            vn = float(nominal.get(g["voltage_level_id"], 0.0))
+            s = g["rated_s"]
+            if not (math.isfinite(s) and s > 0):
+                cap = _gen_capacity(g)
+                s = cap / DEFAULT_GENERATOR_POWER_FACTOR if cap > 0 else 0.0
+            base = (vn * vn / s) if (vn > 0 and s > 0) else 1.0
+            trans.append(DEFAULT_TRANS_X_PU * base)
+            subtrans.append(DEFAULT_SUBTRANS_X_PU * base)
+        network.create_extensions(
+            "generatorShortCircuit", id=list(gens.index),
+            direct_trans_x=trans, direct_sub_trans_x=subtrans,
+            step_up_transformer_x=[0.0] * len(gens))
+        stats["generators"] = len(gens)
+
+    skip_vl = _elements_with_extension(network, "identifiableShortCircuit") if only_missing else set()
+    vids = [v for v in network.get_voltage_levels().index if v not in skip_vl]
+    if vids:
+        ip_max = [_IP_MAX_BY_CLASS[_voltage_class(float(nominal[v]))] for v in vids]
+        network.create_extensions(
+            "identifiableShortCircuit", id=vids,
+            ip_min=[m * _IP_MIN_FRACTION for m in ip_max], ip_max=ip_max)
+        stats["voltage_levels"] = len(vids)
+    return stats
 
 
 # ---------------------------------------------------------------------------

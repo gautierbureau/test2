@@ -380,6 +380,95 @@ class NetworkCompleterTest {
                 new com.powsybl.iidm.serde.ExportOptions(), out);
     }
 
+    // -----------------------------------------------------------------------
+    // Reactive capability curves / load detail / discrete measurements /
+    // properties / short circuit
+    // -----------------------------------------------------------------------
+
+    @Test
+    void reactiveCapabilityCurvesReplaceBand() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        LoadFlow.run(net);
+        NetworkCompleter.addRatedS(net, NetworkCompleter.DEFAULT_GENERATOR_POWER_FACTOR,
+                NetworkCompleter.DEFAULT_TRANSFORMER_LOADING, false, false);
+        NetworkCompleter.ReactiveCurveStats stats =
+                NetworkCompleter.addReactiveCapabilityCurves(net, 3, true);
+        assertTrue(stats.set() >= 1);
+        Generator g = net.getGenerators().iterator().next();
+        var curve = g.getReactiveLimits(com.powsybl.iidm.network.ReactiveCapabilityCurve.class);
+        assertEquals(3, curve.getPointCount());
+        // Idempotent: generators already on a curve are skipped.
+        assertEquals(0, NetworkCompleter.addReactiveCapabilityCurves(net, 3, true).set());
+    }
+
+    @Test
+    void loadDetailSplitsFixedAndVariable() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        NetworkCompleter.LoadDetailStats stats = NetworkCompleter.addLoadDetail(net, 0.4, true);
+        assertTrue(stats.set() >= 1);
+        com.powsybl.iidm.network.Load load = net.getLoads().iterator().next();
+        com.powsybl.iidm.network.extensions.LoadDetail d =
+                load.getExtension(com.powsybl.iidm.network.extensions.LoadDetail.class);
+        assertEquals(0.4 * load.getP0(), d.getFixedActivePower(), 1e-9);
+        assertEquals(0.6 * load.getP0(), d.getVariableActivePower(), 1e-9);
+        // Idempotent.
+        assertEquals(0, NetworkCompleter.addLoadDetail(net, 0.4, true).set());
+    }
+
+    @Test
+    void discreteMeasurementsOnTapChangers() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        LoadFlow.run(net);
+        NetworkCompleter.addRatioTapChangers(net, NetworkCompleter.RatioTapConfig.defaults()
+                .withRunLoadFlow(false));
+        NetworkCompleter.DiscreteMeasurementsStats stats =
+                NetworkCompleter.addDiscreteMeasurements(net, true);
+        assertEquals(countRatioTapChangers(net), stats.measurements());
+        TwoWindingsTransformer tx = net.getTwoWindingsTransformers().iterator().next();
+        assertNotNull(tx.getExtension(
+                com.powsybl.iidm.network.extensions.DiscreteMeasurements.class));
+        // Idempotent.
+        assertEquals(0, NetworkCompleter.addDiscreteMeasurements(net, true).measurements());
+    }
+
+    @Test
+    void propertiesTagSubstationsAndVoltageLevels() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        NetworkCompleter.PropertiesStats stats =
+                NetworkCompleter.addProperties(net, 10, "XX", true);
+        assertTrue(stats.substations() >= 1);
+        assertTrue(stats.voltageLevels() >= 1);
+        var sub = net.getSubstations().iterator().next();
+        assertTrue(sub.getPropertyNames().contains("region"));
+        assertEquals("XX", sub.getProperty("country_code"));
+        var vl = net.getVoltageLevels().iterator().next();
+        assertTrue(java.util.Set.of("EHV", "HV", "MV", "LV")
+                .contains(vl.getProperty("voltage_class")));
+        // Idempotent: elements already carrying a property are skipped.
+        assertEquals(0, NetworkCompleter.addProperties(net, 10, "XX", true).substations());
+    }
+
+    @Test
+    void shortCircuitOnGeneratorsAndVoltageLevels() {
+        Network net = IeeeCdfNetworkFactory.create14();
+        LoadFlow.run(net);
+        NetworkCompleter.addRatedS(net, NetworkCompleter.DEFAULT_GENERATOR_POWER_FACTOR,
+                NetworkCompleter.DEFAULT_TRANSFORMER_LOADING, false, false);
+        NetworkCompleter.ShortCircuitStats stats = NetworkCompleter.addShortCircuit(net, true);
+        assertTrue(stats.generators() >= 1);
+        assertEquals(net.getVoltageLevelCount(), stats.voltageLevels());
+        Generator g = net.getGenerators().iterator().next();
+        var sc = g.getExtension(com.powsybl.iidm.network.extensions.GeneratorShortCircuit.class);
+        assertTrue(sc.getDirectTransX() > 0);
+        var vl = net.getVoltageLevels().iterator().next();
+        var isc = vl.getExtension(
+                com.powsybl.iidm.network.extensions.IdentifiableShortCircuit.class);
+        assertTrue(isc.getIpMax() > 0);
+        assertEquals(0.3 * isc.getIpMax(), isc.getIpMin(), 1e-6);
+        // Idempotent.
+        assertEquals(0, NetworkCompleter.addShortCircuit(net, true).generators());
+    }
+
     private static long countRatioTapChangers(Network net) {
         long n = 0;
         for (TwoWindingsTransformer tx : net.getTwoWindingsTransformers()) {
