@@ -47,6 +47,21 @@ class BuildFullNetworkTest {
     }
 
     @Test
+    void builtinCaseNamesResolveToTheIeeeNetworks() {
+        assertEquals(57, BuildFullNetwork.resolveCase("ieee57").getBusBreakerView().getBusCount());
+        assertEquals(118, BuildFullNetwork.resolveCase("ieee118").getBusBreakerView().getBusCount());
+    }
+
+    @Test
+    void buildFullOnBuiltinIeee57Converges() {
+        Network net = BuildFullNetwork.buildFull(BuildFullNetwork.resolveCase("ieee57"), true);
+        assertTrue(net.getBusbarSectionCount() >= 57);
+        assertTrue(net.getBatteryCount() > 0);
+        assertTrue(net.getHvdcLineCount() > 0);
+        assertTrue(LoadFlow.run(net, dc()).isFullyConverged());
+    }
+
+    @Test
     void converterSetsBusbarSectionPositions() {
         Network net = BusToNodeBreakerConverter.convert(IeeeCdfNetworkFactory.create14());
         for (var bbs : net.getBusbarSections()) {

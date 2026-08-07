@@ -1,6 +1,7 @@
 package com.example.transporter;
 
 import com.powsybl.computation.local.LocalComputationManager;
+import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.ImportConfig;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.serde.NetworkSerDe;
@@ -9,8 +10,11 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
 
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
+import java.util.function.Supplier;
 
 /**
  * Build a fully-enhanced network in one pass — the Java port of
@@ -25,6 +29,10 @@ import java.util.Properties;
  * shared / secondary / transformer / shunt voltage control, SVC standby, HVDC
  * angle droop).
  *
+ * <p>The source is either an input file or, when the first argument names one, a
+ * bundled IEEE case ({@code ieee14}, {@code ieee57}, {@code ieee118},
+ * {@code ieee300}) — the same set the Python CLI exposes via {@code --builtin}.
+ *
  * <p>Unlike the Python pipeline (which completes on the bus-breaker network and
  * converts last), the typed IIDM API lets us convert first and complete on the
  * node-breaker network, so the extensions never have to be copied across the
@@ -33,6 +41,16 @@ import java.util.Properties;
  * whose node-breaker form does not reconverge is still written.
  */
 public final class BuildFullNetwork {
+
+    /** Bundled IEEE cases usable instead of an input file (mirrors the Python CLI). */
+    private static final Map<String, Supplier<Network>> BUILTINS = new LinkedHashMap<>();
+
+    static {
+        BUILTINS.put("ieee14", IeeeCdfNetworkFactory::create14);
+        BUILTINS.put("ieee57", IeeeCdfNetworkFactory::create57);
+        BUILTINS.put("ieee118", IeeeCdfNetworkFactory::create118);
+        BUILTINS.put("ieee300", IeeeCdfNetworkFactory::create300);
+    }
 
     private BuildFullNetwork() {
     }
@@ -147,13 +165,24 @@ public final class BuildFullNetwork {
         return net;
     }
 
+    /**
+     * Resolve the source case: a bundled IEEE network when {@code source} names one
+     * ({@code ieee14}, {@code ieee57}, {@code ieee118}, {@code ieee300}), else the
+     * file at that path.
+     */
+    static Network resolveCase(String source) {
+        Supplier<Network> builtin = BUILTINS.get(source.toLowerCase(Locale.ROOT));
+        return builtin != null ? builtin.get() : loadCase(Path.of(source));
+    }
+
     public static void main(String[] args) {
         if (args.length < 2) {
-            System.err.println("usage: BuildFullNetwork <input> <output> [--bus-breaker]");
+            System.err.println("usage: BuildFullNetwork <input|" + String.join("|", BUILTINS.keySet())
+                    + "> <output> [--bus-breaker]");
             System.exit(2);
         }
         boolean nodeBreaker = args.length < 3 || !"--bus-breaker".equals(args[2]);
-        Network net = loadCase(Path.of(args[0]));
+        Network net = resolveCase(args[0]);
         net = buildFull(net, nodeBreaker);
         NetworkSerDe.write(net, Path.of(args[1]));
         System.out.println("Wrote " + args[1]);

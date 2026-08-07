@@ -19,6 +19,45 @@ python3 build_full_network.py -i case13659pegase.xiidm -o data/pegase13659_full.
 python3 network_summary.py --all -i data/pegase13659_full.xiidm.gz
 ```
 
+## Small fixtures: the IEEE cases
+
+The same pipeline runs on the bundled IEEE networks (`--builtin`), giving small
+fixtures — seconds to build, kilobytes on disk — that carry the *same* 16
+extensions as the PEGASE one, so they work as cheap stand-ins in tests:
+
+```
+cd python
+python3 build_full_network.py --builtin ieee300 -o data/ieee300_full.xiidm.gz
+python3 network_summary.py --all -i data/ieee300_full.xiidm.gz
+```
+
+| | IEEE-14 | IEEE-57 | IEEE-118 | IEEE-300 | PEGASE |
+|---|--:|--:|--:|--:|--:|
+| BUS | 14 | 57 | 119 | 301 | 13,666 |
+| BUSBAR_SECTION | 14 | 57 | 119 | 301 | 13,666 |
+| SWITCH | 150 | 472 | 1,116 | 2,260 | 118,892 |
+| GENERATOR | 5 | 7 | 54 | 69 | 4,092 |
+| TWO_WINDINGS_TRANSFORMER | 3 | 17 | 10 | 108 | 5,736 |
+| RATIO_TAP_CHANGER | 3 | 17 | 9 | 106 | 5,655 |
+| PHASE_TAP_CHANGER | 0 | 0 | 0 | 1 | 74 |
+| LOADING_LIMITS | 320 | 1,264 | 2,976 | 6,544 | 308,712 |
+| REACTIVE_CAPABILITY_CURVE_POINT | 15 | 21 | 159 | 204 | 12,255 |
+| object types present (of 43) | 22 | 22 | 22 | 24 | 24 |
+| extensions present (of 29) | 16 | 16 | 16 | 16 | 16 |
+| final load flow (DC init) | CONVERGED | CONVERGED | CONVERGED | CONVERGED | CONVERGED |
+
+The PEGASE column is a fresh re-measure of the committed fixture, so a few counts
+sit slightly above the gap table further down (which was taken before the later
+completions landed).
+
+What the small cases cannot reach is a property of the source data, not of the
+pipeline: no generator sits at ≥ 200 kV in IEEE-14/57, so the remote-voltage-control
+step deports none (IEEE-118/300 deport one each, which is where their extra bus
+comes from), only IEEE-300 has multi-unit voltage levels for shared voltage control
+(7 groups) and a phase shifter, and IEEE-57 ships flat 1 kV base voltages, so every
+voltage level is classed `MV` and its limits — sized from the real amps at that
+base — are numerically large.
+
 `status` legend: `ok` = both non-zero (comparable) · `GAP` = reference has it, we
 don't · `—` = not registered in our pypowsybl (unreachable) · blank = zero in both.
 

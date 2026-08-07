@@ -95,6 +95,14 @@ def _reattach_identifiable_short_circuit(src: pn.Network, dst: pn.Network) -> No
                               df[[c for c in df.columns if c != "equipment_type"]])
 
 
+_BUILTINS = {
+    "ieee14": pn.create_ieee14,
+    "ieee57": pn.create_ieee57,
+    "ieee118": pn.create_ieee118,
+    "ieee300": pn.create_ieee300,
+}
+
+
 def _load_case(input_path: str) -> pn.Network:
     """Load a case, keeping real base voltages for MATPOWER inputs.
 
@@ -110,9 +118,13 @@ def _load_case(input_path: str) -> pn.Network:
 
 
 def build_full(input_path: str, output_path: str,
-               node_breaker: bool = True) -> pn.Network:
-    """Apply every enhancement to the network at ``input_path`` and save it."""
-    net = _load_case(input_path)
+               node_breaker: bool = True, builtin: str = None) -> pn.Network:
+    """Apply every enhancement to a case and save it.
+
+    The case is either the file at ``input_path`` or, when ``builtin`` is given,
+    one of the bundled IEEE networks (``_BUILTINS``).
+    """
+    net = _BUILTINS[builtin]() if builtin else _load_case(input_path)
 
     # Inject synthetic equipment the source cases lack (batteries, SVCs, HVDC
     # links) before the load flow; they are created electrically neutral, so the
@@ -204,16 +216,20 @@ def build_full(input_path: str, output_path: str,
 
 def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-i", "--input", required=True,
-                        help="input case; a .mat/.m MATPOWER case is imported with "
-                             "real base voltages automatically (e.g. case13659pegase.mat)")
+    src = parser.add_mutually_exclusive_group(required=True)
+    src.add_argument("-i", "--input",
+                     help="input case; a .mat/.m MATPOWER case is imported with "
+                          "real base voltages automatically (e.g. case13659pegase.mat)")
+    src.add_argument("--builtin", choices=sorted(_BUILTINS),
+                     help="use a bundled IEEE network instead of --input")
     parser.add_argument("-o", "--output", default="full_network.xiidm.gz",
                         help="output network; a .gz suffix writes it compressed "
                              "(default: %(default)s)")
     parser.add_argument("--bus-breaker", action="store_true",
                         help="keep the bus-breaker topology (skip node-breaker conversion)")
     args = parser.parse_args(argv)
-    build_full(args.input, args.output, node_breaker=not args.bus_breaker)
+    build_full(args.input, args.output, node_breaker=not args.bus_breaker,
+               builtin=args.builtin)
     return 0
 
 
