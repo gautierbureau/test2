@@ -16,6 +16,7 @@ import pypowsybl.network as pn
 
 _BUILTINS = {
     "ieee14": pn.create_ieee14,
+    "ieee57": pn.create_ieee57,
     "ieee118": pn.create_ieee118,
     "ieee300": pn.create_ieee300,
 }

@@ -244,6 +244,74 @@ python3 complete_network.py -i case.xiidm --generation-mix --rated-s --active-po
 python3 complete_network.py -i case.xiidm --measurements --observability -o out.xiidm
 ```
 
+## Building a full, realistic network in one pass
+
+`python/build_full_network.py` (and the Java `BuildFullNetwork`) chains
+everything above off a **single** load flow: it injects the synthetic equipment
+source cases lack (batteries, SVCs, VSC HVDC links), applies every completion,
+sizes current + apparent-power limits, rebuilds the result as a **node-breaker**
+network and then adds the OpenLoadFlow outer-loop modeling that only feeder bays
+can carry (remote / shared / secondary / transformer / shunt voltage control, SVC
+standby automaton, HVDC angle droop). The finished network is re-solved with a
+DC-based voltage init so the output is saved converged.
+
+The input is any case pypowsybl can import, or one of the bundled IEEE networks
+via `--builtin`:
+
+```
+cd python
+python3 build_full_network.py --builtin ieee14  -o data/ieee14_full.xiidm.gz
+python3 build_full_network.py --builtin ieee57  -o data/ieee57_full.xiidm.gz
+python3 build_full_network.py --builtin ieee118 -o data/ieee118_full.xiidm.gz
+python3 build_full_network.py --builtin ieee300 -o data/ieee300_full.xiidm.gz
+python3 build_full_network.py -i case13659pegase.mat -o data/pegase13659_full.xiidm.gz
+python3 build_full_network.py -i case.xiidm --bus-breaker -o out.xiidm.gz
+```
+
+```
+cd java
+java -cp target/curve-transporter-1.0.0-shaded.jar \
+     com.example.transporter.BuildFullNetwork ieee300 /tmp/ieee300_full.xiidm
+```
+
+### Committed fixtures
+
+`python/data/*.xiidm.gz` holds pre-built outputs, small enough to use as test
+input and rich enough to compare a synthetic network against (see
+`network_summary.py` and `docs/fixture_reference_gaps.md`). The four IEEE
+fixtures are built by exactly the commands above; all four end **CONVERGED**:
+
+| fixture | buses | busbar sections | switches | generators | loading limits | file |
+|---|--:|--:|--:|--:|--:|--:|
+| `ieee14_full`  |  14 |  14 |   150 |  5 |   320 |  15 KB |
+| `ieee57_full`  |  57 |  57 |   472 |  7 | 1 264 |  48 KB |
+| `ieee118_full` | 119 | 119 | 1 116 | 54 | 2 976 | 109 KB |
+| `ieee300_full` | 301 | 301 | 2 260 | 69 | 6 544 | 242 KB |
+
+(The 119th / 301st bus is the LV bus of the generator step-up transformer the
+remote-voltage-control step adds.) Each carries the same 16 extensions as the
+large fixtures — `activePowerControl`, `busbarSectionPosition`, `detail`,
+`discreteMeasurements`, `generatorShortCircuit`, `identifiableShortCircuit`,
+`branch`/`injectionObservability`, `measurements`, `position`, `standbyAutomaton`,
+`voltageRegulation`, `hvdcAngleDroopActivePowerControl`,
+`hvdcOperatorActivePowerRange`, `voltagePerReactivePowerControl`, `slackTerminal`.
+
+Two things scale with the source case rather than with the pipeline:
+
+- **Remote voltage control** only deports generators on buses ≥ 200 kV, so IEEE-14
+  (135 kV max) and IEEE-57 get none; IEEE-118 and IEEE-300 (345 kV) each get one.
+  Shared voltage control likewise needs several generators in one voltage level —
+  only IEEE-300 has them (7 groups).
+- **IEEE-57 ships flat 1 kV base voltages** (its CDF source carries no real ones),
+  so everything voltage-dependent degrades accordingly: every voltage level is
+  classed `MV`, no generator is EHV-eligible, and the limits — sized from the
+  actual amps at 1 kV — are numerically large. The network is still electrically
+  consistent and converged; it is the source data, not the pipeline. IEEE-14/118/300
+  carry real base voltages (135 / 345 / 345 kV) and are unaffected.
+
+The larger fixtures (`pegase9241`, `pegase13659`, `rte6515`, `ACTIVSg70k`) come
+from external source cases and are documented in `docs/fixture_reference_gaps.md`.
+
 ## Method (per-unit, on HV side)
 
 ```
